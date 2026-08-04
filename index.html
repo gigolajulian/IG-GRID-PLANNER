@@ -1,0 +1,545 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Grid Planner — Instagram Layout</title>
+<style>
+  :root {
+    --bg: #fafafa;
+    --panel: #ffffff;
+    --border: #dbdbdb;
+    --text: #262626;
+    --muted: #8e8e8e;
+    --accent: #0095f6;
+    --danger: #ed4956;
+    --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    -webkit-font-smoothing: antialiased;
+  }
+  header.topbar {
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    padding: 14px 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+  .topbar h1 {
+    font-size: 18px;
+    margin: 0;
+    font-weight: 600;
+    letter-spacing: -0.2px;
+  }
+  .topbar .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+  .btn {
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--text);
+    padding: 8px 14px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background .15s, opacity .15s;
+  }
+  .btn:hover { background: #f2f2f2; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn.primary:hover { opacity: .9; background: var(--accent); }
+  .btn.danger { color: var(--danger); border-color: var(--danger); }
+  .btn.danger:hover { background: #fff0f1; }
+
+  .layout {
+    max-width: 1100px;
+    margin: 24px auto;
+    padding: 0 16px;
+    display: grid;
+    grid-template-columns: 1fr 320px;
+    gap: 28px;
+    align-items: start;
+  }
+  @media (max-width: 860px) {
+    .layout { grid-template-columns: 1fr; }
+    .sidebar { order: -1; }
+  }
+
+  /* Phone profile mockup */
+  .phone {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    overflow: hidden;
+    box-shadow: 0 4px 24px rgba(0,0,0,.05);
+  }
+  .profile {
+    padding: 18px 16px 14px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 18px;
+  }
+  .avatar {
+    width: 72px; height: 72px;
+    border-radius: 50%;
+    background: linear-gradient(45deg,#f09433,#e6683c,#dc2743,#cc2366,#bc1888);
+    padding: 3px;
+    flex-shrink: 0;
+    cursor: pointer;
+    position: relative;
+  }
+  .avatar img { width: 100%; height: 100%; border-radius: 50%; object-fit: cover; display:block; border: 2px solid #fff; }
+  .avatar .ph {
+    width:100%; height:100%; border-radius:50%;
+    background:#efefef; border:2px solid #fff;
+    display:flex; align-items:center; justify-content:center;
+    color: var(--muted); font-size: 22px;
+  }
+  .profile-meta { flex: 1; min-width: 0; }
+  .profile-name { font-weight: 600; font-size: 15px; margin-bottom: 6px; outline: none; }
+  .profile-name:focus { background:#f0f8ff; border-radius:4px; }
+  .stats { display: flex; gap: 18px; }
+  .stat { text-align: center; font-size: 13px; color: var(--muted); }
+  .stat b { display:block; color: var(--text); font-size: 14px; }
+
+  .grid-tabs {
+    display:flex; justify-content:center; gap:40px;
+    border-bottom:1px solid var(--border);
+    padding: 8px 0;
+    color: var(--muted);
+    font-size: 18px;
+  }
+  .grid-tabs .active { color: var(--text); border-top: 1px solid var(--text); margin-top:-9px; padding-top:8px; }
+
+  /* The grid */
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 2px;
+    background: var(--panel);
+  }
+  .cell {
+    position: relative;
+    aspect-ratio: 3 / 4;           /* Instagram portrait grid ratio */
+    background: #fff;
+    overflow: hidden;
+    cursor: grab;
+  }
+  .cell img {
+    width: 100%; height: 100%;
+    object-fit: cover;
+    display: block;
+    pointer-events: none;
+  }
+  .cell.dragging { opacity: .35; }
+  .cell.over { outline: 3px solid var(--accent); outline-offset: -3px; }
+  .cell .num {
+    position:absolute; top:4px; left:4px;
+    background: rgba(0,0,0,.55); color:#fff;
+    font-size: 11px; font-weight:600;
+    padding: 1px 6px; border-radius: 10px;
+    opacity: 0; transition: opacity .15s;
+  }
+  .cell:hover .num { opacity: 1; }
+  .cell .remove {
+    position:absolute; top:4px; right:4px;
+    width:22px; height:22px; border-radius:50%;
+    background: rgba(0,0,0,.55); color:#fff;
+    border:none; cursor:pointer;
+    font-size: 13px; line-height: 1;
+    display:flex; align-items:center; justify-content:center;
+    opacity: 0; transition: opacity .15s;
+  }
+  .cell:hover .remove { opacity: 1; }
+  .cell .remove:hover { background: var(--danger); }
+
+  .empty-cell {
+    aspect-ratio: 3 / 4;
+    background: #f7f7f7;
+    border: 1px dashed var(--border);
+    display:flex; align-items:center; justify-content:center;
+    color: #c7c7c7; font-size: 26px;
+  }
+
+  /* Sidebar */
+  .sidebar .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+  .card h2 { font-size: 14px; margin: 0 0 6px; }
+  .card p { font-size: 13px; color: var(--muted); margin: 0 0 12px; line-height: 1.5; }
+
+  .dropzone {
+    border: 2px dashed var(--border);
+    border-radius: var(--radius);
+    padding: 26px 12px;
+    text-align: center;
+    color: var(--muted);
+    font-size: 13px;
+    cursor: pointer;
+    transition: border-color .15s, background .15s;
+  }
+  .dropzone:hover, .dropzone.dragover { border-color: var(--accent); background:#f0f8ff; color: var(--accent); }
+  .dropzone svg { display:block; margin: 0 auto 8px; }
+
+  .hint { font-size:12px; color: var(--muted); line-height:1.5; }
+  .hint code { background:#f0f0f0; padding:1px 5px; border-radius:4px; }
+  .row { display:flex; gap:8px; }
+  .row .btn { flex:1; }
+  input[type=file] { display:none; }
+  .count { font-size:12px; color:var(--muted); margin-top:10px; text-align:center; }
+</style>
+</head>
+<body>
+  <header class="topbar">
+    <h1>📐 Grid Planner</h1>
+    <div class="actions">
+      <button class="btn" id="addBtn">+ Add photos</button>
+      <button class="btn danger" id="clearBtn">Clear all</button>
+    </div>
+  </header>
+
+  <div class="layout">
+    <!-- Preview -->
+    <div class="phone">
+      <div class="profile">
+        <div class="avatar" id="avatar" title="Click to set profile photo">
+          <div class="ph">＋</div>
+        </div>
+        <div class="profile-meta">
+          <div class="profile-name" id="profileName" contenteditable="true" spellcheck="false">your_username</div>
+          <div class="stats">
+            <div class="stat"><b id="postCount">0</b>posts</div>
+            <div class="stat"><b>1,234</b>followers</div>
+            <div class="stat"><b>567</b>following</div>
+          </div>
+        </div>
+      </div>
+      <div class="grid-tabs">
+        <span class="active">▦</span>
+        <span>♡</span>
+        <span>⊞</span>
+      </div>
+      <div class="grid" id="grid"></div>
+    </div>
+
+    <!-- Sidebar -->
+    <div class="sidebar">
+      <div class="card">
+        <h2>Add your photos</h2>
+        <p>Upload the photos from your Instagram, then drag tiles to match your real grid.</p>
+        <div class="dropzone" id="dropzone">
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+            <path d="M12 16V4m0 0L8 8m4-4l4 4"/><path d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2"/>
+          </svg>
+          Drag &amp; drop images here<br>or click to browse
+        </div>
+        <div class="count" id="count">No photos yet</div>
+      </div>
+
+      <div class="card">
+        <h2>How it works</h2>
+        <p class="hint">
+          • Tiles are locked to <b>3:4</b> (Instagram's portrait grid).<br>
+          • <b>Drag</b> any tile to reorder — top-left is your newest post.<br>
+          • Hover a tile to see its position or remove it.<br>
+          • Your layout auto-saves in this browser.
+        </p>
+      </div>
+
+      <div class="card">
+        <h2>Export</h2>
+        <div class="row">
+          <button class="btn" id="exportBtn">Save layout</button>
+          <button class="btn" id="importBtn">Load layout</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <input type="file" id="fileInput" accept="image/*" multiple />
+  <input type="file" id="avatarInput" accept="image/*" />
+  <input type="file" id="importInput" accept="application/json" />
+
+<script>
+(function () {
+  "use strict";
+
+  var STORAGE_KEY = "gridPlannerState_v1";
+  var MIN_CELLS = 9; // always show at least 3 rows of placeholders
+
+  var state = { photos: [], avatar: null, name: "your_username" };
+
+  var grid = document.getElementById("grid");
+  var fileInput = document.getElementById("fileInput");
+  var avatarInput = document.getElementById("avatarInput");
+  var importInput = document.getElementById("importInput");
+  var dropzone = document.getElementById("dropzone");
+  var countEl = document.getElementById("count");
+  var postCountEl = document.getElementById("postCount");
+  var avatarEl = document.getElementById("avatar");
+  var nameEl = document.getElementById("profileName");
+
+  /* ---------- persistence ---------- */
+  function save() {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    } catch (e) {
+      // localStorage may be full (data URLs are large) — fail gracefully
+      console.warn("Could not save layout:", e);
+    }
+  }
+  function load() {
+    try {
+      var raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        var parsed = JSON.parse(raw);
+        if (parsed && Array.isArray(parsed.photos)) state = parsed;
+      }
+    } catch (e) { /* ignore corrupt state */ }
+  }
+
+  /* ---------- helpers ---------- */
+  function uid() {
+    return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  }
+
+  function readFileAsDataURL(file) {
+    return new Promise(function (resolve, reject) {
+      var fr = new FileReader();
+      fr.onload = function () { resolve(fr.result); };
+      fr.onerror = reject;
+      fr.readAsDataURL(file);
+    });
+  }
+
+  function addFiles(fileList) {
+    var files = Array.prototype.slice.call(fileList)
+      .filter(function (f) { return f.type.indexOf("image/") === 0; });
+    if (!files.length) return;
+    Promise.all(files.map(readFileAsDataURL)).then(function (urls) {
+      // New photos go to the TOP of the feed (top-left = newest post),
+      // matching how Instagram places your latest upload.
+      var added = urls.map(function (url) {
+        return { id: uid(), src: url };
+      });
+      state.photos = added.concat(state.photos);
+      save();
+      render();
+    });
+  }
+
+  /* ---------- drag & drop reordering ---------- */
+  var dragId = null;
+
+  function onDragStart(e) {
+    dragId = this.dataset.id;
+    this.classList.add("dragging");
+    e.dataTransfer.effectAllowed = "move";
+    try { e.dataTransfer.setData("text/plain", dragId); } catch (_) {}
+  }
+  function onDragEnd() {
+    this.classList.remove("dragging");
+    Array.prototype.forEach.call(grid.querySelectorAll(".over"), function (c) {
+      c.classList.remove("over");
+    });
+    dragId = null;
+  }
+  function onDragOver(e) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    if (this.dataset.id !== dragId) this.classList.add("over");
+  }
+  function onDragLeave() { this.classList.remove("over"); }
+  function onDrop(e) {
+    e.preventDefault();
+    this.classList.remove("over");
+    var targetId = this.dataset.id;
+    if (!dragId || dragId === targetId) return;
+    var from = state.photos.findIndex(function (p) { return p.id === dragId; });
+    var to = state.photos.findIndex(function (p) { return p.id === targetId; });
+    if (from < 0 || to < 0) return;
+    var moved = state.photos.splice(from, 1)[0];
+    state.photos.splice(to, 0, moved);
+    save();
+    render();
+  }
+
+  /* ---------- render ---------- */
+  function render() {
+    grid.innerHTML = "";
+
+    state.photos.forEach(function (photo, i) {
+      var cell = document.createElement("div");
+      cell.className = "cell";
+      cell.draggable = true;
+      cell.dataset.id = photo.id;
+
+      var img = document.createElement("img");
+      img.src = photo.src;
+      img.alt = "Post " + (i + 1);
+      cell.appendChild(img);
+
+      var num = document.createElement("span");
+      num.className = "num";
+      num.textContent = i + 1;
+      cell.appendChild(num);
+
+      var rm = document.createElement("button");
+      rm.className = "remove";
+      rm.innerHTML = "&times;";
+      rm.title = "Remove";
+      rm.addEventListener("click", function (ev) {
+        ev.stopPropagation();
+        state.photos = state.photos.filter(function (p) { return p.id !== photo.id; });
+        save();
+        render();
+      });
+      cell.appendChild(rm);
+
+      cell.addEventListener("dragstart", onDragStart);
+      cell.addEventListener("dragend", onDragEnd);
+      cell.addEventListener("dragover", onDragOver);
+      cell.addEventListener("dragleave", onDragLeave);
+      cell.addEventListener("drop", onDrop);
+
+      grid.appendChild(cell);
+    });
+
+    // pad with empty placeholders so the grid keeps its shape
+    var pad = Math.max(0, MIN_CELLS - state.photos.length);
+    // also top up to complete the last row of 3
+    var remainder = (state.photos.length % 3);
+    if (state.photos.length >= MIN_CELLS && remainder !== 0) pad = 3 - remainder;
+    for (var k = 0; k < pad; k++) {
+      var empty = document.createElement("div");
+      empty.className = "empty-cell";
+      empty.textContent = "+";
+      grid.appendChild(empty);
+    }
+
+    // header bits
+    postCountEl.textContent = state.photos.length;
+    countEl.textContent = state.photos.length
+      ? state.photos.length + " photo" + (state.photos.length === 1 ? "" : "s") + " in grid"
+      : "No photos yet";
+
+    avatarEl.innerHTML = "";
+    if (state.avatar) {
+      var av = document.createElement("img");
+      av.src = state.avatar;
+      avatarEl.appendChild(av);
+    } else {
+      var ph = document.createElement("div");
+      ph.className = "ph";
+      ph.textContent = "＋";
+      avatarEl.appendChild(ph);
+    }
+
+    nameEl.textContent = state.name || "your_username";
+  }
+
+  /* ---------- events ---------- */
+  document.getElementById("addBtn").addEventListener("click", function () { fileInput.click(); });
+  dropzone.addEventListener("click", function () { fileInput.click(); });
+  fileInput.addEventListener("change", function () {
+    addFiles(this.files);
+    this.value = "";
+  });
+
+  ["dragenter", "dragover"].forEach(function (ev) {
+    dropzone.addEventListener(ev, function (e) {
+      e.preventDefault();
+      dropzone.classList.add("dragover");
+    });
+  });
+  ["dragleave", "drop"].forEach(function (ev) {
+    dropzone.addEventListener(ev, function (e) {
+      e.preventDefault();
+      dropzone.classList.remove("dragover");
+    });
+  });
+  dropzone.addEventListener("drop", function (e) {
+    if (e.dataTransfer && e.dataTransfer.files) addFiles(e.dataTransfer.files);
+  });
+
+  document.getElementById("clearBtn").addEventListener("click", function () {
+    if (!state.photos.length || confirm("Remove all photos from the grid?")) {
+      state.photos = [];
+      save();
+      render();
+    }
+  });
+
+  // avatar
+  avatarEl.addEventListener("click", function () { avatarInput.click(); });
+  avatarInput.addEventListener("change", function () {
+    if (this.files[0]) {
+      readFileAsDataURL(this.files[0]).then(function (url) {
+        state.avatar = url; save(); render();
+      });
+    }
+    this.value = "";
+  });
+
+  // editable username
+  nameEl.addEventListener("blur", function () {
+    state.name = nameEl.textContent.trim() || "your_username";
+    save();
+  });
+  nameEl.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") { e.preventDefault(); nameEl.blur(); }
+  });
+
+  // export / import layout
+  document.getElementById("exportBtn").addEventListener("click", function () {
+    var blob = new Blob([JSON.stringify(state, null, 2)], { type: "application/json" });
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "grid-layout.json";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  });
+  document.getElementById("importBtn").addEventListener("click", function () { importInput.click(); });
+  importInput.addEventListener("change", function () {
+    var file = this.files[0];
+    this.value = "";
+    if (!file) return;
+    readFileAsDataURL(file); // noop to keep API consistent
+    var fr = new FileReader();
+    fr.onload = function () {
+      try {
+        var parsed = JSON.parse(fr.result);
+        if (parsed && Array.isArray(parsed.photos)) {
+          state = parsed;
+          save();
+          render();
+        } else {
+          alert("That file doesn't look like a saved grid layout.");
+        }
+      } catch (e) {
+        alert("Could not read that layout file.");
+      }
+    };
+    fr.readAsText(file);
+  });
+
+  /* ---------- init ---------- */
+  load();
+  render();
+})();
+</script>
+</body>
+</html>
