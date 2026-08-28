@@ -23,6 +23,7 @@
     --gap-phone:1.5px;
     --gap-desktop:4px;
     --radius:6px;
+    --rail:214px;
     font-synthesis:none;
   }
   *{box-sizing:border-box;}
@@ -100,17 +101,20 @@
   /* ---------- layout ---------- */
   main{
     padding:22px 16px 120px;
-    display:grid;grid-template-columns:214px minmax(0,1fr);
+    /* empty third column mirrors the tray rail, so the feed sits on the true centre
+       of the screen rather than centred in whatever space the rail left over */
+    display:grid;grid-template-columns:var(--rail) minmax(0,1fr) var(--rail);
     gap:24px;align-items:start;
   }
   .stagecol{display:flex;flex-direction:column;align-items:center;gap:22px;min-width:0;}
+  /* --rail and .narrow are set by applyLayout(): CSS media queries evaluate against
+     the raw viewport and cannot see the root zoom, which is what actually decides how
+     much CSS space there is to lay out in */
+  html.narrow main{grid-template-columns:minmax(0,1fr);}
+  html.narrow .tray-sec{position:static;max-height:none;order:2;}
+  html.narrow .stagecol{order:1;}
   .stage{width:100%;display:flex;justify-content:center;}
-  /* narrow screens: rail drops back under the grid */
-  @media (max-width:900px){
-    main{grid-template-columns:minmax(0,1fr);}
-    .tray-sec{position:static !important;max-height:none !important;order:2;}
-    .stagecol{order:1;}
-  }
+
 
   /* phone mock */
   .phone{
@@ -331,6 +335,7 @@
   .tray::-webkit-scrollbar-thumb{background:#2c2c33;border-radius:4px;}
   .tray.over{border-color:var(--accent);background:#141418;}
   .tray .tile{width:84px;aspect-ratio:3/4;border-radius:4px;flex:0 0 auto;}
+  html.narrow .tray .tile{width:78px;}
   .tray-empty{font-size:11.5px;line-height:1.5;text-align:center;}
   .tray-empty{color:var(--txt-faint);font-size:12px;padding:14px 6px;align-self:center;margin:auto;}
 
@@ -2817,8 +2822,19 @@ document.addEventListener("click", e=>{ if(!e.target.closest(".menu-wrap")) clos
    getBoundingClientRect all stay in one consistent coordinate space — the drag maths
    depends on that. */
 const SCALE_STEPS = [1, 1.25, 1.6, 2];
+/* how much CSS space we actually have = viewport / zoom. Media queries cannot work
+   this out, so the rail width and the stacked fallback are decided here. */
+function applyLayout(){
+  const eff = window.innerWidth / (state.scale || 1);
+  const root = document.documentElement;
+  root.classList.toggle("narrow", eff < 780);
+  root.style.setProperty("--rail", eff < 1000 ? "112px" : eff < 1180 ? "132px" : "214px");
+}
+window.addEventListener("resize", applyLayout);
+
 function applyScale(){
   document.documentElement.style.zoom = state.scale;
+  applyLayout();
   const b = $("#btnScale");
   if(b) b.textContent = `Interface size: ${Math.round(state.scale*100)}%`;
 }
