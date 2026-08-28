@@ -254,11 +254,22 @@
     color:var(--txt-faint);font-size:18px;background:transparent;
   }
   .opt-add:hover{border-color:var(--accent);color:var(--txt);}
+  /* reads as "this slot holds a stack of candidates", not just a number */
   .alt-badge{
-    position:absolute;left:4px;bottom:24px;z-index:6;min-width:16px;height:16px;padding:0 4px;
-    display:grid;place-items:center;border-radius:8px;background:rgba(0,0,0,.62);
-    color:#fff;font-size:9.5px;font-weight:700;
+    position:absolute;left:4px;bottom:24px;z-index:7;height:17px;padding:0 5px;
+    display:flex;align-items:center;gap:3px;border-radius:9px;
+    background:var(--accent);color:#0b0b0c;font-size:10px;font-weight:700;
+    box-shadow:0 1px 5px rgba(0,0,0,.55);
   }
+  .alt-badge svg{display:block;}
+  /* offset sliver along the right edge, like cards stacked behind the photo */
+  .stack-edge{
+    position:absolute;top:5px;right:0;bottom:5px;width:5px;z-index:5;pointer-events:none;
+    background:linear-gradient(to right,
+      rgba(0,0,0,.55) 0 1px, rgba(255,255,255,.30) 1px 2.5px,
+      rgba(0,0,0,.45) 2.5px 3.5px, rgba(255,255,255,.18) 3.5px 5px);
+  }
+  .tray .tile .alt-badge{bottom:4px;}
 
   /* ---------- motion ---------- */
   @media (prefers-reduced-motion: no-preference){
@@ -1225,6 +1236,7 @@ function tileEl(id, zone, index, flags){
   el.draggable = state.cropId !== id;
   if(it.posted) el.classList.add("is-posted");
   if(it.pinned) el.classList.add("pinned");
+  if(it.alts && it.alts.length) el.classList.add("has-alts");
   if(state.selId === id) el.classList.add("sel");
   if(state.cropId === id) el.classList.add("cropping");
   if(zone === "grid" && flags && flags[id]){
@@ -1259,7 +1271,12 @@ function tileEl(id, zone, index, flags){
        <button data-act="post" title="${it.posted?"Mark as planned":"Mark as posted"}">${it.posted?"●":"○"}</button>
        <button data-act="del" class="del" title="Remove this photo">✕</button>
      </div>` +
-    (it.alts && it.alts.length ? `<div class="alt-badge" title="${it.alts.length+1} options for this slot">${it.alts.length+1}</div>` : "") +
+    (it.alts && it.alts.length ? `<div class="stack-edge"></div>` +
+      `<div class="alt-badge" title="${it.alts.length+1} options for this slot — click the tile to compare them">` +
+        `<svg viewBox="0 0 24 24" width="9" height="9" aria-hidden="true">` +
+          `<rect x="7" y="3" width="14" height="14" rx="3" fill="none" stroke="currentColor" stroke-width="2.4"/>` +
+          `<path d="M17 20H6a2 2 0 0 1-2-2V7" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>` +
+        `</svg>${it.alts.length+1}</div>` : "") +
     (it.note ? `<div class="note-dot" title="has a note"></div>` : "") +
     (it.posted ? `<div class="posted-dot"></div>` : "") +
     (zone==="grid" && SCORES[id]!=null ? (()=>{
@@ -1802,6 +1819,8 @@ document.addEventListener("click", e=>{
     render();
     return;
   }
+  // a programmatic click on a hidden file input must not count as "clicked away"
+  if(e.target.matches && e.target.matches('input[type="file"]')) return;
   if(!e.target.closest("#inspector") && !e.target.closest("header") &&
      !e.target.closest("#syncModal") && !e.target.closest("#sliceModal")){
     if(state.selId || state.cropId){ state.selId=null; state.cropId=null; render(); }
@@ -2720,9 +2739,14 @@ $("#syncModal").addEventListener("click", e=>{ if(e.target.id === "syncModal") c
 
 let altTarget = null;
 $("#altPicker").addEventListener("change", async e=>{
-  const files = e.target.files; e.target.value = "";
-  if(files && files.length && altTarget && state.items[altTarget]) await addAlternates(altTarget, files);
-  altTarget = null;
+  const files = Array.from(e.target.files || []);   // copy BEFORE clearing: value="" empties the live FileList
+  e.target.value = "";
+  const id = altTarget; altTarget = null;
+  if(files.length && id && state.items[id]){
+    await addAlternates(id, files);
+    state.selId = id;            // keep the tile open so the new option is visible
+    render();
+  }
 });
 
 $("#igPickShot").onclick = ()=>$("#shotPicker").click();
