@@ -222,18 +222,18 @@
 
   /* ---------- per-slot options ---------- */
   .opts{display:flex;flex-wrap:wrap;gap:7px;}
-  .opt{
+  .slotopt{
     position:relative;width:62px;aspect-ratio:3/4;border-radius:5px;overflow:hidden;
     cursor:pointer;background:#0e0e10;outline:1px solid var(--line-2);outline-offset:-1px;
   }
-  .opt img{width:100%;height:100%;object-fit:cover;display:block;}
-  .opt:hover{outline-color:#5a5a66;}
-  .opt.live{outline:2px solid var(--accent);outline-offset:-2px;cursor:default;}
-  .opt.best::after{
+  .slotopt img{width:100%;height:100%;object-fit:cover;display:block;}
+  .slotopt:hover{outline-color:#5a5a66;}
+  .slotopt.live{outline:2px solid var(--accent);outline-offset:-2px;cursor:default;}
+  .slotopt.best::after{
     content:"";position:absolute;inset:0;border-radius:4px;
     box-shadow:inset 0 0 0 2px #6fbf7f;pointer-events:none;
   }
-  .opt.live.best::after{box-shadow:none;}
+  .slotopt.live.best::after{box-shadow:none;}
   .opt-grade{
     position:absolute;left:3px;bottom:3px;width:14px;height:14px;display:grid;place-items:center;
     border-radius:3px;font-size:9px;font-weight:700;color:#0b0b0c;
@@ -247,7 +247,7 @@
     background:rgba(0,0,0,.6);color:#fff;font-size:9px;line-height:1;display:grid;place-items:center;
     opacity:0;transition:opacity .12s;
   }
-  .opt:hover .opt-x{opacity:1;}
+  .slotopt:hover .opt-x{opacity:1;}
   .opt-x:hover{background:var(--danger);}
   .opt-add{
     width:62px;aspect-ratio:3/4;border-radius:5px;border:1px dashed var(--line-2);
@@ -706,6 +706,7 @@ const state = {
 
 let dragId = null, dropMark = null, dragCounter = 0;
 let SCORES = {};      // id -> slot-fit score for the current grid, refreshed each render
+let scaleFromSave = false;   // did the interface size come from a saved plan?
 
 const $  = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
@@ -827,7 +828,7 @@ function adopt(data){
   if(["phone","desktop","rows"].includes(data.view)) state.view = data.view;
   if(typeof data.rhythm==="boolean") state.rhythm = data.rhythm;
   if(typeof data.nums==="boolean")   state.nums   = data.nums;
-  if(typeof data.scale==="number")   state.scale  = clamp(data.scale, 0.5, 3);
+  if(typeof data.scale==="number"){ state.scale = clamp(data.scale, 0.5, 3); scaleFromSave = true; }
   state.imagesDropped = !!data.imagesDropped;
   state.selId = null; state.cropId = null;
   normaliseOrder();
@@ -1434,7 +1435,7 @@ function renderInspector(){
     const sc = optScores ? optScores[i] : null;
     const g = gradeOf(sc);
     const tip = `${esc(p.name||"option "+(i+1))}${sc!=null?` — would score ${sc}/100 in this slot`:""}`;
-    return `<div class="opt${i===0?" live":""}${i===bestOpt&&optCount>1?" best":""}" data-opt="${i}" title="${tip}">
+    return `<div class="slotopt${i===0?" live":""}${i===bestOpt&&optCount>1?" best":""}" data-opt="${i}" title="${tip}">
       <img src="${p.src||p.remote||""}" style="object-position:${p.fx}% ${p.fy}%" alt="">
       ${sc!=null?`<span class="opt-grade g${g}">${g}</span>`:""}
       ${i===0?`<span class="opt-tag">in slot</span>`:""}
@@ -1504,7 +1505,7 @@ function renderInspector(){
   $("#btnReplace").onclick = ()=>{ replaceTarget = it.id; $("#filePicker").click(); };
   $("#btnDel").onclick     = ()=>removeTile(it.id);
 
-  document.querySelectorAll("#inspBody .opt").forEach(el=>{
+  document.querySelectorAll("#inspBody .slotopt").forEach(el=>{
     el.addEventListener("click", e=>{
       const x = e.target.closest("[data-drop]");
       if(x){ e.stopPropagation(); dropAlternate(it.id, +x.dataset.drop); return; }
@@ -2910,6 +2911,8 @@ render();
 if(!maybeSeed()) render();
 try{ if(localStorage.getItem(KEY)) lastSavedAt = Date.now(); }catch(_){ }
 prevSnap = takeSnap();
+// 160% suits a desktop; on a phone it just means endless scrolling
+if(!scaleFromSave && window.innerWidth < 900) state.scale = 1;
 applyScale();
 updateSaveUI();
 
