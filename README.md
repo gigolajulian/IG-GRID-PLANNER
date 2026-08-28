@@ -50,10 +50,13 @@ Hover any tile for its four controls: **pin**, **crop**, **planned/posted**, **r
 Click a tile to open the inspector for everything else. Anything you use rarely
 (export, import, refresh, clear) lives under the **⋯** menu.
 
+The staging tray sits in a sticky rail down the left, so unplaced shots stay in
+view while you work the grid. On narrow screens it drops back underneath.
+
 | Action | How |
 | --- | --- |
 | Add photos | **Add photos**, or drop image files anywhere on the page. They land in the staging tray. |
-| Slot a photo into the feed | Drag it from the tray up into the grid. |
+| Slot a photo into the feed | Drag it from the tray into the grid, or use **Place in grid** — which drops it at the head of the feed, just under the pins, since that is what you post next. |
 | Reorder | Drag any tile. A white bar shows where it will land; everything else reflows 3-wide. |
 | Unslot | Drag a grid tile down onto the tray, or use **Send to tray** in the inspector. |
 | Pin | The 📌 button on a tile, `F`, or **Pin to top** in the inspector. |

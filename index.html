@@ -98,8 +98,19 @@
   #banner .btn:hover{background:#3a2a14;color:#ffdca6;}
 
   /* ---------- layout ---------- */
-  main{padding:24px 16px 120px;display:flex;flex-direction:column;align-items:center;gap:34px;}
+  main{
+    padding:22px 16px 120px;
+    display:grid;grid-template-columns:214px minmax(0,1fr);
+    gap:24px;align-items:start;
+  }
+  .stagecol{display:flex;flex-direction:column;align-items:center;gap:22px;min-width:0;}
   .stage{width:100%;display:flex;justify-content:center;}
+  /* narrow screens: rail drops back under the grid */
+  @media (max-width:900px){
+    main{grid-template-columns:minmax(0,1fr);}
+    .tray-sec{position:static !important;max-height:none !important;order:2;}
+    .stagecol{order:1;}
+  }
 
   /* phone mock */
   .phone{
@@ -304,7 +315,7 @@
   .rowbar i{flex:0 0 33.333%;}
 
   /* ---------- tray ---------- */
-  .tray-sec{width:100%;max-width:900px;}
+  .tray-sec{position:sticky;top:78px;min-width:0;}
   .sec-head{
     display:flex;align-items:center;gap:10px;margin-bottom:10px;
     color:var(--txt-dim);font-size:11px;letter-spacing:1.1px;text-transform:uppercase;font-weight:600;
@@ -312,11 +323,15 @@
   .sec-head .count{color:var(--txt-faint);font-weight:400;letter-spacing:.3px;text-transform:none;font-size:11.5px;}
   .sec-head .acts{margin-left:auto;display:flex;gap:6px;}
   .tray{
-    display:flex;flex-wrap:wrap;gap:8px;min-height:112px;padding:10px;
+    display:flex;flex-wrap:wrap;gap:8px;min-height:150px;padding:10px;
     border:1px dashed var(--line-2);border-radius:8px;background:#0e0e10;align-content:flex-start;
+    max-height:calc(100vh - 200px);overflow-y:auto;justify-content:center;
   }
+  .tray::-webkit-scrollbar{width:8px;}
+  .tray::-webkit-scrollbar-thumb{background:#2c2c33;border-radius:4px;}
   .tray.over{border-color:var(--accent);background:#141418;}
-  .tray .tile{width:78px;aspect-ratio:3/4;border-radius:4px;flex:0 0 auto;}
+  .tray .tile{width:84px;aspect-ratio:3/4;border-radius:4px;flex:0 0 auto;}
+  .tray-empty{font-size:11.5px;line-height:1.5;text-align:center;}
   .tray-empty{color:var(--txt-faint);font-size:12px;padding:14px 6px;align-self:center;margin:auto;}
 
   /* ---------- inspector ---------- */
@@ -557,21 +572,23 @@
 <div id="banner"></div>
 
 <main>
-  <div class="stage" id="stage"></div>
-
-  <section class="tray-sec">
+  <aside class="tray-sec">
     <div class="sec-head">
       Staging tray <span class="count" id="trayCount"></span>
     </div>
     <div class="tray" id="tray" data-zone="tray"></div>
+  </aside>
+
+  <div class="stagecol">
+    <div class="stage" id="stage"></div>
     <div class="legend">
       <span><i style="background:var(--posted)"></i> posted</span>
       <span><i style="background:#6fbf7f;border-radius:3px"></i> A–D = how well a photo fits its spot (hover the badge for why)</span>
       <span><i style="background:var(--warn-dark)"></i> two dark tiles adjacent</span>
       <span><i style="background:var(--warn-busy)"></i> two busy tiles adjacent</span>
-      <span class="tip">Drag tiles to reorder · hover a tile for pin, crop, posted and remove</span>
+      <span class="tip">Drag tiles to reorder · right-click one for quick actions</span>
     </div>
-  </section>
+  </div>
 </main>
 
 <aside id="inspector">
@@ -942,6 +959,8 @@ function newItem(over){
    around them, so dragging other tiles can never dislodge a pin. */
 const MAX_PINS = 3;
 const pinnedIds = () => state.grid.filter(id => state.items[id].pinned);
+/* first slot a normal tile can occupy: straight after the pinned block */
+const topSlot = () => pinnedIds().length;
 
 function normaliseOrder(){
   const pin  = state.grid.filter(id =>  state.items[id].pinned);
@@ -1425,7 +1444,7 @@ function render(){
   if(!state.tray.length){
     const p = document.createElement("div");
     p.className = "tray-empty";
-    p.textContent = "Empty — uploads land here. Drag a tile down from the grid to unslot it.";
+    p.textContent = "Empty — uploads land here. Drag tiles in to unslot them.";
     tray.appendChild(p);
   }else{
     state.tray.forEach((id,i)=> tray.appendChild(tileEl(id,"tray",i,null)));
@@ -1534,7 +1553,7 @@ function renderInspector(){
   $("#noteBox").addEventListener("input", e=>{ it.note = e.target.value; save(); markNoteDot(it); });
   $("#btnPin").onclick     = ()=>togglePin(it.id);
   $("#btnPosted").onclick  = ()=>{ it.posted=!it.posted; render(); save(); };
-  $("#btnMove").onclick    = ()=>{ inGrid ? moveTo(it.id,"tray",state.tray.length) : moveTo(it.id,"grid",state.grid.length); };
+  $("#btnMove").onclick    = ()=>{ inGrid ? moveTo(it.id,"tray",state.tray.length) : moveTo(it.id,"grid",topSlot()); };
   $("#btnDup").onclick     = ()=>duplicate(it.id);
   $("#btnReplace").onclick = ()=>{ replaceTarget = it.id; $("#filePicker").click(); };
   $("#btnDel").onclick     = ()=>removeTile(it.id);
@@ -1825,7 +1844,7 @@ document.addEventListener("click", e=>{
     if(act==="crop"){ state.cropId = state.cropId===id ? null : id; state.selId = id; render(); }
     if(act==="move"){
       const z = locate(id);
-      moveTo(id, z==="grid"?"tray":"grid", z==="grid" ? state.tray.length : state.grid.length);
+      moveTo(id, z==="grid"?"tray":"grid", z==="grid" ? state.tray.length : topSlot());
     }
     return;
   }
@@ -2631,7 +2650,7 @@ $("#ctxMenu").addEventListener("click", e=>{
   if(!id || !state.items[id]) return;
   switch(act){
     case "tray":      moveTo(id, "tray", state.tray.length); break;
-    case "grid":      moveTo(id, "grid", state.grid.length); break;
+    case "grid":      moveTo(id, "grid", topSlot()); break;
     case "pin":       togglePin(id); break;
     case "posted":    state.items[id].posted = !state.items[id].posted; render(); save(); break;
     case "crop":      state.selId = id; state.cropId = id; render(); break;
@@ -2918,8 +2937,9 @@ $("#filePicker").addEventListener("change", async e=>{
 
 $("#btnTrayAll").onclick = ()=>{
   if(!state.tray.length) return;
-  state.grid = state.grid.concat(state.tray);
+  state.grid.splice(topSlot(), 0, ...state.tray);   // newest first, under the pins
   state.tray = [];
+  normaliseOrder();
   render(); save();
 };
 $("#btnTrayBack").onclick = ()=>{
