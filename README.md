@@ -61,6 +61,7 @@ Click a tile to open the inspector for everything else. Anything you use rarely
 | Nudge the crop | Click a tile and drag inside the big 3:4 preview. Or hit `⊕` on the tile and drag it in place. |
 | Planned ⇄ posted | The `○`/`●` button on a tile, or **Mark posted** in the inspector. |
 | Caption / notes | Inspector → *Caption / notes*. Tiles with a note get a small white dot. |
+| Quick actions | **Right-click any tile** for a compact menu: send to tray / place in grid, pin, planned-posted, crop, options, duplicate, remove. |
 
 
 ### Trying several frames in one slot

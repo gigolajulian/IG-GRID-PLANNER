@@ -409,6 +409,20 @@
   .pinned-note b{color:#f0c883;}
   a.btn{text-decoration:none;display:inline-block;}
 
+  /* ---------- right-click menu ---------- */
+  .ctxmenu{
+    position:fixed;top:0;left:0;right:auto;min-width:184px;max-width:240px;z-index:120;
+    box-shadow:0 18px 40px -16px #000, 0 0 0 1px rgba(0,0,0,.5);
+  }
+  .ctxmenu .ctx-head{
+    padding:7px 10px 6px;font-size:10px;letter-spacing:.7px;text-transform:uppercase;
+    color:var(--txt-faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:210px;
+  }
+  .ctxmenu button{display:flex;align-items:center;justify-content:space-between;gap:14px;}
+  .ctxmenu button .k{color:var(--txt-faint);font-size:10.5px;}
+  .ctxmenu button:hover .k{color:var(--txt-dim);}
+  .tile.ctx-target{outline:2px solid var(--accent);outline-offset:-2px;z-index:6;}
+
   /* ---------- screenshot slicer ---------- */
   #sliceModal{
     position:fixed;inset:0;z-index:95;display:none;
@@ -679,6 +693,8 @@
     </div>
   </div>
 </div>
+
+<div class="menu ctxmenu" id="ctxMenu" role="menu"></div>
 
 <div id="dropzone"><div>Drop photos to add<small>they land in the staging tray</small></div></div>
 <div id="toast"></div>
@@ -1822,6 +1838,8 @@ document.addEventListener("click", e=>{
   }
   // a programmatic click on a hidden file input must not count as "clicked away"
   if(e.target.matches && e.target.matches('input[type="file"]')) return;
+  if(e.target.closest("#ctxMenu")) return;
+  closeCtx();
   if(!e.target.closest("#inspector") && !e.target.closest("header") &&
      !e.target.closest("#syncModal") && !e.target.closest("#sliceModal")){
     if(state.selId || state.cropId){ state.selId=null; state.cropId=null; render(); }
@@ -2543,6 +2561,93 @@ async function commitSlices(){
   if(clipped) showBanner(`${clipped} cell${clipped===1?" fell":"s fell"} outside the screenshot and ${clipped===1?"was":"were"} skipped — lower the <b>Rows</b> count.`, false);
 }
 
+/* ============================ right-click menu ============================ */
+/* The tile hover controls only fit four buttons. Everything else lived in the
+   inspector, which is a lot of clicks for "put this back in the tray". */
+let ctxId = null;
+
+function closeCtx(){
+  const m = $("#ctxMenu");
+  if(m) m.classList.remove("show");
+  document.querySelectorAll(".tile.ctx-target").forEach(e => e.classList.remove("ctx-target"));
+  ctxId = null;
+}
+
+function openCtx(id, x, y, tileEl){
+  const it = state.items[id];
+  if(!it) return;
+  ctxId = id;
+  const inGrid = state.grid.includes(id);
+  const opts = 1 + (it.alts ? it.alts.length : 0);
+
+  const rows = [
+    inGrid ? {a:"tray",  label:"Send to tray"}
+           : {a:"grid",  label:"Place in grid"},
+    {a:"pin",     label: it.pinned ? "Unpin" : "Pin to top", key:"F"},
+    {a:"posted",  label: it.posted ? "Mark as planned" : "Mark as posted", key:"P"},
+    {sep:true},
+    {a:"crop",    label:"Adjust crop", key:"C"},
+    {a:"options", label: opts > 1 ? `Options (${opts})` : "Add options…"},
+    {a:"open",    label:"Open details"},
+    {sep:true},
+    {a:"duplicate", label:"Duplicate"},
+    {a:"remove",    label:"Remove", danger:true, key:"Del"}
+  ];
+
+  const m = $("#ctxMenu");
+  m.innerHTML =
+    `<div class="ctx-head">${esc(it.name || "photo")}${inGrid ? " · slot "+(state.grid.indexOf(id)+1) : " · tray"}</div><hr>` +
+    rows.map(r => r.sep ? "<hr>" :
+      `<button data-ctx="${r.a}"${r.danger?' class="danger"':''}>${r.label}${r.key?`<span class="k">${r.key}</span>`:""}</button>`
+    ).join("");
+
+  m.classList.add("show");
+  if(tileEl) tileEl.classList.add("ctx-target");
+
+  // CSS lengths are multiplied by the root zoom, but clientX/rects are not
+  const z = state.scale || 1;
+  const r = m.getBoundingClientRect();
+  let px = x, py = y;
+  if(px + r.width  > window.innerWidth  - 8) px = Math.max(8, window.innerWidth  - r.width  - 8);
+  if(py + r.height > window.innerHeight - 8) py = Math.max(8, window.innerHeight - r.height - 8);
+  m.style.left = (px / z) + "px";
+  m.style.top  = (py / z) + "px";
+}
+
+document.addEventListener("contextmenu", e=>{
+  const t = e.target.closest && e.target.closest(".tile[data-id]");
+  if(!t){ closeCtx(); return; }        // leave the browser menu alone everywhere else
+  e.preventDefault();
+  closeCtx();
+  openCtx(t.dataset.id, e.clientX, e.clientY, t);
+});
+
+$("#ctxMenu").addEventListener("click", e=>{
+  const b = e.target.closest("button[data-ctx]");
+  if(!b) return;
+  e.stopPropagation();
+  const id = ctxId, act = b.dataset.ctx;
+  closeCtx();
+  if(!id || !state.items[id]) return;
+  switch(act){
+    case "tray":      moveTo(id, "tray", state.tray.length); break;
+    case "grid":      moveTo(id, "grid", state.grid.length); break;
+    case "pin":       togglePin(id); break;
+    case "posted":    state.items[id].posted = !state.items[id].posted; render(); save(); break;
+    case "crop":      state.selId = id; state.cropId = id; render(); break;
+    case "open":      state.selId = id; state.cropId = null; render(); break;
+    case "options":   state.selId = id; render();
+                      setTimeout(()=>$("#btnAddAlt") && $("#btnAddAlt").scrollIntoView({block:"center"}), 40);
+                      break;
+    case "duplicate": duplicate(id); break;
+    case "remove":    removeTile(id); break;
+  }
+});
+
+window.addEventListener("scroll", closeCtx, true);
+window.addEventListener("resize", closeCtx);
+document.addEventListener("dragstart", closeCtx);
+
 /* ---- sync dialog ---- */
 const SRC_LABEL = {server:"the Instagram login", api:"a pasted token",
                    export:"a data export", shot:"a screenshot"};
@@ -2876,6 +2981,7 @@ $("#jsonPicker").addEventListener("change", e=>{
 document.addEventListener("keydown", e=>{
   const typing = /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName);
   if(e.key === "Escape"){
+    if(ctxId){ closeCtx(); return; }
     if($("#addModal").classList.contains("show")){ closeAdd(); return; }
     if($("#sliceModal").classList.contains("show")){ closeSlicer(); return; }
     if($("#syncModal").classList.contains("show")){ closeSync(); return; }
