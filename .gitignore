@@ -1,0 +1,11 @@
+# secrets — never commit these
+config.json
+.token.json
+*-key.pem
+*-cert.pem
+
+# exported plans can contain your photos as data URLs
+grid-plan-*.json
+
+# local editor/agent settings
+.claude/

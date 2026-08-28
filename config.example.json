@@ -1,0 +1,9 @@
+{
+  "_comment": "Copy this file to config.json and fill in the two values from your Meta app. config.json holds a secret - do not share it or commit it.",
+
+  "appId": "YOUR_INSTAGRAM_APP_ID",
+  "appSecret": "YOUR_INSTAGRAM_APP_SECRET",
+
+  "_redirectUri": "Must match a Valid OAuth Redirect URI in your Meta app EXACTLY, including the trailing path. Meta requires https. Try the https://localhost form first (run: node server.mjs --https); if Meta rejects it, use a tunnel such as ngrok and paste that https URL here.",
+  "redirectUri": "https://localhost:8443/auth/callback"
+}
