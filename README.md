@@ -130,7 +130,15 @@ can see where planning ends and your real feed begins.
 
 With a tile selected: `←` `→` move it, `P` toggles posted, `F` pins/unpins,
 `C` toggles crop mode, `Delete` removes it, `Esc` closes.
-`Ctrl+Z` (or the `↶` button) undoes any change, up to 40 steps back.
+`Ctrl+Z` (or the `↶` button) undoes any change, up to 40 steps back;
+`Ctrl+Shift+Z` / `↷` redoes.
+
+### On a phone
+
+Touch has no hover and no right-click, so the tile controls used to be unreachable.
+Now: **tap once** to select a tile and reveal its controls, **tap again** to open the
+details sheet, and **long-press** for the quick menu. The inspector becomes a bottom
+sheet, the header packs to a single row, and duplicate photos are flagged on import.
 
 ## Pulling in photos you've already posted
 

@@ -79,6 +79,21 @@
   .menu button:hover{background:#232329;color:var(--txt);}
   .menu button.danger:hover{color:var(--danger);}
   .menu button.on::after{content:"✓";float:right;color:var(--accent);}
+  /* buttons relocated from the header keep menu-row shape, not header-button shape */
+  #compactSlot{display:contents;}
+  #compactSlot .btn{
+    border:0;background:none;text-align:left;padding:8px 10px;border-radius:5px;
+    color:var(--txt-dim);font-size:12.5px;width:100%;
+  }
+  #compactSlot .btn:hover{background:#232329;color:var(--txt);}
+  #compactSlot .btn.primary{color:var(--txt);}
+  /* the counts line is long and nowrap, so on its own it forces extra header rows */
+  html.compact header .stats{display:none;}
+  html.compact .savestate{display:none;}
+  html.compact .brand{display:none;}
+  /* a growing spacer in a wrapping flex row pushes everything after it onto a new line */
+  html.compact header .spacer{display:none;}
+  html.compact header{gap:8px;padding:8px 10px;}
   .menu hr{margin:4px 6px;}
   .stats{color:var(--txt-faint);font-size:11.5px;letter-spacing:.2px;white-space:nowrap;}
   .savestate{font-size:11px;color:var(--txt-faint);white-space:nowrap;display:flex;align-items:center;gap:5px;}
@@ -287,6 +302,7 @@
     box-shadow:inset 0 0 0 1px rgba(255,255,255,.42), 0 2px 9px rgba(0,0,0,.55);
   }
   .tray .tile .alt-badge{bottom:4px;height:16px;font-size:9px;}
+
 
   /* ---------- motion ---------- */
   @media (prefers-reduced-motion: no-preference){
@@ -535,6 +551,41 @@
   .legend .tip{color:#4d4d55;}
   .legend span{display:flex;align-items:center;gap:5px;}
   .legend i{width:9px;height:9px;border-radius:2px;display:block;}
+  /* ---------- touch ----------
+     Every tile action hung off :hover, which a touch screen does not have, so on a phone
+     pin / crop / posted / remove were unreachable. Selecting a tile now reveals them, and
+     the targets grow to a usable size. */
+  @media (pointer:coarse){
+    .tile.sel .tools, .tile.sel .idx{opacity:1;}
+    .tools{gap:5px;}
+    .tools button{width:30px;height:30px;font-size:14px;border-radius:6px;
+                  background:rgba(0,0,0,.66);}
+    .tile img{transition:none;}
+    .tile:hover img{transform:none;}          /* sticky hover on touch looks broken */
+    .grade{width:19px;height:19px;font-size:11px;}
+    .alt-badge{height:21px;font-size:11px;}
+    .pin-badge{width:22px;height:22px;}
+
+    /* inspector becomes a bottom sheet: a side drawer wastes a phone's width */
+    #inspector{
+      top:auto;left:0;right:0;bottom:0;width:auto;max-height:86vh;
+      border-left:0;border-top:1px solid var(--line-2);
+      border-radius:14px 14px 0 0;
+      transform:translateY(100%);
+    }
+    #inspector.open{transform:none;box-shadow:0 -24px 60px -30px #000;}
+    .insp-head{position:sticky;top:0;background:var(--panel);z-index:2;}
+    .insp-head::before{
+      content:"";position:absolute;top:5px;left:50%;transform:translateX(-50%);
+      width:34px;height:4px;border-radius:2px;background:var(--line-2);
+    }
+    /* the slicer's numeric grid is unusable in two columns at this width */
+    .sf-grid{grid-template-columns:1fr;}
+    .sf-grid input[type=number]{padding:9px 10px;font-size:15px;}
+    .slice-sheet{grid-template-columns:1fr;grid-template-rows:auto 1fr auto;}
+    .opt-add,.slotopt{width:74px;}
+    header .btn{padding:7px 11px;}
+  }
 </style>
 </head>
 <body>
@@ -550,6 +601,7 @@
   <button class="btn" id="btnArrange" title="Slot your pending posts so tones alternate and clashes drop. Press again for a different take. Pinned and posted tiles never move.">Arrange</button>
   <button class="btn" id="btnReflow" title="Rearrange the already-posted tiles for better flow. Press again for a different variation. Pinned and pending tiles never move.">Reflow</button>
   <button class="btn icon" id="btnUndo" title="Undo last change (Ctrl+Z)">↶</button>
+  <button class="btn icon" id="btnRedo" title="Redo (Ctrl+Shift+Z)">↷</button>
   <div class="spacer"></div>
   <div class="stats" id="stats"></div>
   <span class="savestate" id="saveState" title="Your plan autosaves to this browser"></span>
@@ -754,6 +806,7 @@ const state = {
   rhythm: true,
   nums: false,
   scale: 1.6,     // interface zoom; the photos are the point, so default to big
+  inspOpen: false,// on touch, selecting only reveals a tile's controls; opening is a 2nd tap
   selId: null,
   cropId: null,
   imagesDropped: false
@@ -865,6 +918,7 @@ function adopt(data){
       pinned: !!s.pinned,
       alts: Array.isArray(s.alts) ? s.alts : [],
       note: s.note || "",
+      hash: typeof s.hash === "string" ? s.hash : null,
       lum: typeof s.lum==="number" ? s.lum : null,
       busy: typeof s.busy==="number" ? s.busy : null,
       igId: s.igId || null,              // dedupe key for re-syncs
@@ -952,12 +1006,48 @@ async function ingestBlob(blob){
   const ctx = c.getContext("2d");
   ctx.fillStyle = "#000"; ctx.fillRect(0,0,w,h);
   ctx.drawImage(im, 0,0, w,h);
-  return { src: c.toDataURL("image/jpeg", JPEG_Q), w, h };
+  return { src: c.toDataURL("image/jpeg", JPEG_Q), w, h, hash: aHash(im) };
+}
+
+/* 8x8 average hash: cheap, tolerant of recompression and resizing, and plenty to catch
+   "I already added this one". A 64-char bit string, so comparison is just Hamming. */
+function aHash(img){
+  try{
+    const N = 8;
+    const c = document.createElement("canvas"); c.width = N; c.height = N;
+    const x = c.getContext("2d", {willReadFrequently:true});
+    x.drawImage(img, 0, 0, N, N);
+    const d = x.getImageData(0,0,N,N).data;
+    const v = [];
+    for(let i=0;i<N*N;i++) v.push(0.2126*d[i*4] + 0.7152*d[i*4+1] + 0.0722*d[i*4+2]);
+    const mean = v.reduce((a,b)=>a+b,0) / v.length;
+    return v.map(t => t >= mean ? "1" : "0").join("");
+  }catch(_){ return null; }
+}
+function hashDistance(a, b){
+  if(!a || !b || a.length !== b.length) return Infinity;
+  let d = 0;
+  for(let i=0;i<a.length;i++) if(a[i] !== b[i]) d++;
+  return d;
+}
+/* closest existing photo, if it is near enough to be the same shot. Options count too:
+   a frame already sitting in another slot's stack is still a duplicate. */
+function findDuplicate(hash, ignoreId){
+  if(!hash) return null;
+  let best = null;
+  for(const it of Object.values(state.items)){
+    if(it.id === ignoreId) continue;
+    for(const hs of [it.hash, ...(it.alts||[]).map(a=>a.hash)]){
+      const d = hashDistance(hash, hs);
+      if(d <= 5 && (!best || d < best.d)) best = {item:it, d};
+    }
+  }
+  return best;
 }
 
 function newItem(over){
   const it = { id:uid(), name:"", src:null, remote:null, w:0, h:0, fx:50, fy:50,
-               posted:false, pinned:false, note:"", lum:null, busy:null,
+               posted:false, pinned:false, note:"", lum:null, busy:null, hash:null,
                igId:null, ts:0, permalink:null, alts:[], ...over };
   state.items[it.id] = it;
   return it;
@@ -998,17 +1088,33 @@ async function addFiles(fileList){
   if(!files.length) return;
   toast(`Processing ${files.length} photo${files.length>1?"s":""}…`);
   let added = 0;
+  const dupes = [];
   for(const f of files){
     try{
-      const {src,w,h} = await ingestBlob(f);
-      const it = newItem({name:f.name, src, w, h});
+      const {src,w,h,hash} = await ingestBlob(f);
+      const dup = findDuplicate(hash);
+      const it = newItem({name:f.name, src, w, h, hash});
       state.tray.push(it.id);
       await computeStats(it);
       added++;
+      if(dup) dupes.push({id:it.id, name:f.name, of:dup.item.name});
     }catch(_){ /* skip unreadable file */ }
   }
   render(); save();
-  toast(`Added ${added} photo${added===1?"":"s"} to the tray`);
+  if(dupes.length){
+    /* Added anyway rather than blocked -- you may well want the same frame twice. The
+       offer is to take them back out, which the history stack already knows how to do. */
+    toast(`Added ${added} · ${dupes.length} look${dupes.length===1?"s":""} like ` +
+          `${dupes.length===1 ? "a photo" : "photos"} you already have`,
+          "Remove duplicates", ()=>{
+            lastHistPush = 0;
+            dupes.forEach(d => del(d.id));
+            render(); save();
+            toast(`Removed ${dupes.length} duplicate${dupes.length===1?"":"s"}`, "Undo", undo);
+          });
+  }else{
+    toast(`Added ${added} photo${added===1?"":"s"} to the tray`);
+  }
 }
 
 /* cover-crop source rect matching CSS object-fit:cover + object-position:fx% fy% */
@@ -1052,7 +1158,7 @@ async function computeStats(it){
 /* Every mutation already funnels through save(), so snapshot there. Item copies share
    their src strings by reference, so a deep-looking snapshot costs almost nothing. */
 const HIST_MAX = 40;
-let history = [], lastHistPush = 0, prevSnap = null;
+let history = [], future = [], lastHistPush = 0, prevSnap = null;
 
 function takeSnap(){
   // alts must be copied too, or history shares the live array and can't undo option edits
@@ -1067,10 +1173,27 @@ function pushHistory(){
   lastHistPush = now;
   history.push(prevSnap);
   if(history.length > HIST_MAX) history.shift();
+  future.length = 0;              // a fresh edit invalidates anything undone
+}
+function applySnap(snap){
+  state.items = snap.items; state.grid = snap.grid; state.tray = snap.tray;
+  if(state.selId && !state.items[state.selId]) state.selId = null;
+  if(state.cropId && !state.items[state.cropId]) state.cropId = null;
+  prevSnap = takeSnap();
+  render();
+  clearTimeout(saveTimer); saveNow();
+}
+function redo(){
+  const snap = future.pop();
+  if(!snap){ toast("Nothing to redo"); return; }
+  history.push(takeSnap());       // so the redo itself can be undone again
+  applySnap(snap);
+  toast("Redone");
 }
 function undo(){
   const snap = history.pop();
   if(!snap){ toast("Nothing to undo"); return; }
+  future.push(takeSnap());
   state.items = snap.items; state.grid = snap.grid; state.tray = snap.tray;
   if(state.selId && !state.items[state.selId]) state.selId = null;
   if(state.cropId && !state.items[state.cropId]) state.cropId = null;
@@ -1483,6 +1606,7 @@ function renderInspector(){
   const insp = $("#inspector"), body = $("#inspBody");
   const it = state.items[state.selId];
   if(!it){ insp.classList.remove("open"); body.innerHTML=""; return; }
+  if(COARSE && !state.inspOpen){ insp.classList.remove("open"); body.innerHTML=""; return; }
   insp.classList.add("open");
 
   const inGrid = state.grid.includes(it.id);
@@ -1653,7 +1777,7 @@ function removeTile(id){
 /* ---- alternates: several frames from the same set competing for one slot ----
    The live photo lives on the item as usual, so nothing else in the app needs to know
    about this; the losers sit in it.alts and swap places with the live one on demand. */
-const MAX_OPTIONS = 6;
+const MAX_OPTIONS = 8;
 function packPhoto(it){
   return {name:it.name, src:it.src, remote:it.remote||null, w:it.w, h:it.h,
           fx:it.fx, fy:it.fy, lum:it.lum, busy:it.busy};
@@ -1859,8 +1983,17 @@ document.addEventListener("click", e=>{
   }
   const tile = e.target.closest(".tile[data-id]");
   if(tile){
-    if(state.cropId && state.cropId !== tile.dataset.id) state.cropId = null;
-    state.selId = tile.dataset.id;
+    const id = tile.dataset.id;
+    if(state.cropId && state.cropId !== id) state.cropId = null;
+    /* On touch the controls only appear once a tile is selected, so the first tap has to
+       mean "select" and the second "open" -- otherwise the sheet covers the controls you
+       were reaching for. A mouse reveals them on hover, so it opens straight away. */
+    if(COARSE && state.selId !== id){
+      state.selId = id; state.inspOpen = false;   // first tap: reveal the controls only
+      render();
+      return;
+    }
+    state.selId = id; state.inspOpen = true;      // second tap, or any click with a mouse
     render();
     return;
   }
@@ -1870,7 +2003,7 @@ document.addEventListener("click", e=>{
   closeCtx();
   if(!e.target.closest("#inspector") && !e.target.closest("header") &&
      !e.target.closest("#syncModal") && !e.target.closest("#sliceModal")){
-    if(state.selId || state.cropId){ state.selId=null; state.cropId=null; render(); }
+    if(state.selId || state.cropId){ state.selId=null; state.cropId=null; state.inspOpen=false; render(); }
   }
 });
 
@@ -2764,6 +2897,30 @@ function openCtx(id, x, y, tileEl){
   m.style.top  = (py / z) + "px";
 }
 
+/* Touch has no right-click, so long-press is the only way to reach the quick menu. */
+const COARSE = window.matchMedia("(pointer:coarse)").matches;
+let pressTimer = null, pressStart = null;
+document.addEventListener("pointerdown", e=>{
+  if(e.pointerType === "mouse") return;
+  const t = e.target.closest && e.target.closest(".tile[data-id]");
+  if(!t || e.target.closest(".tools")) return;
+  pressStart = {x:e.clientX, y:e.clientY};
+  clearTimeout(pressTimer);
+  pressTimer = setTimeout(()=>{
+    pressTimer = null;
+    if(navigator.vibrate) navigator.vibrate(12);
+    closeCtx();
+    openCtx(t.dataset.id, pressStart.x, pressStart.y, t);
+  }, 480);
+}, {passive:true});
+const cancelPress = ()=>{ clearTimeout(pressTimer); pressTimer = null; };
+document.addEventListener("pointerup", cancelPress, {passive:true});
+document.addEventListener("pointercancel", cancelPress, {passive:true});
+document.addEventListener("pointermove", e=>{
+  if(!pressTimer || !pressStart) return;
+  if(Math.hypot(e.clientX-pressStart.x, e.clientY-pressStart.y) > 10) cancelPress();
+}, {passive:true});
+
 document.addEventListener("contextmenu", e=>{
   const t = e.target.closest && e.target.closest(".tile[data-id]");
   if(!t){ closeCtx(); return; }        // leave the browser menu alone everywhere else
@@ -2784,8 +2941,8 @@ $("#ctxMenu").addEventListener("click", e=>{
     case "grid":      moveTo(id, "grid", topSlot()); break;
     case "pin":       togglePin(id); break;
     case "posted":    state.items[id].posted = !state.items[id].posted; render(); save(); break;
-    case "crop":      state.selId = id; state.cropId = id; render(); break;
-    case "open":      state.selId = id; state.cropId = null; render(); break;
+    case "crop":      state.selId = id; state.cropId = id; state.inspOpen = true; render(); break;
+    case "open":      state.selId = id; state.cropId = null; state.inspOpen = true; render(); break;
     case "options":   state.selId = id; render();
                       setTimeout(()=>$("#btnAddAlt") && $("#btnAddAlt").scrollIntoView({block:"center"}), 40);
                       break;
@@ -2950,11 +3107,66 @@ document.addEventListener("click", e=>{ if(!e.target.closest(".menu-wrap")) clos
 const SCALE_STEPS = [1, 1.25, 1.6, 2];
 /* how much CSS space we actually have = viewport / zoom. Media queries cannot work
    this out, so the rail width and the stacked fallback are decided here. */
+const COMPACT_IDS = ["btnArrange","btnReflow","btnUndo","btnRedo","btnSave","btnSync"];
+let compactNow = null;
+function applyCompactHeader(compact){
+  if(compact === compactNow) return;
+  compactNow = compact;
+  const menu = $("#menu"), head = $("header"), anchor = $("#btnUpload");
+  if(!menu || !head || !anchor) return;
+  let slot = $("#compactSlot");
+  if(!slot){
+    slot = document.createElement("div");
+    slot.id = "compactSlot";
+    menu.insertBefore(slot, menu.firstChild);
+  }
+  for(const id of COMPACT_IDS){
+    const el = document.getElementById(id);
+    if(!el) continue;
+    if(compact){
+      el.dataset.wasIcon = el.classList.contains("icon") ? "1" : "";
+      el.classList.remove("icon");
+      if(!el.dataset.fullLabel) el.dataset.fullLabel = el.textContent.trim();
+      if(id === "btnUndo") el.textContent = "↶  Undo";
+      if(id === "btnRedo") el.textContent = "↷  Redo";
+      slot.appendChild(el);
+    }else{
+      if(el.dataset.wasIcon) el.classList.add("icon");
+      if(el.dataset.fullLabel) el.textContent = el.dataset.fullLabel;
+      head.insertBefore(el, anchor);
+    }
+  }
+  /* the four survivors still total more than a 375px row, so shorten the two widest.
+     The segment keeps its data-view values, which is all the toggle logic reads. */
+  const shorten = {btnUpload:"Add", btnRhythm:"Fit"};
+  for(const [id, short] of Object.entries(shorten)){
+    const el = document.getElementById(id);
+    if(!el) continue;
+    if(!el.dataset.fullLabel) el.dataset.fullLabel = el.textContent.trim();
+    el.textContent = compact ? short : el.dataset.fullLabel;
+  }
+  const shortView = {phone:"Phone", desktop:"Big", rows:"Rows"};
+  head.querySelectorAll("#viewSeg button").forEach(b=>{
+    if(!b.dataset.fullLabel) b.dataset.fullLabel = b.textContent.trim();
+    b.textContent = compact ? (shortView[b.dataset.view] || b.dataset.fullLabel) : b.dataset.fullLabel;
+  });
+
+  if(slot.children.length && !$("#compactSep")){
+    const hr = document.createElement("hr"); hr.id = "compactSep";
+    menu.insertBefore(hr, slot.nextSibling);
+  }
+  const sep = $("#compactSep");
+  if(sep) sep.style.display = compact ? "" : "none";
+}
+
 function applyLayout(){
   const eff = window.innerWidth / (state.scale || 1);
   const root = document.documentElement;
   root.classList.toggle("narrow", eff < 780);
   root.style.setProperty("--rail", eff < 1000 ? "112px" : eff < 1180 ? "132px" : "214px");
+  const compact = eff < 760;
+  root.classList.toggle("compact", compact);
+  applyCompactHeader(compact);
 }
 window.addEventListener("resize", applyLayout);
 
@@ -2975,6 +3187,7 @@ $("#btnRhythm").onclick  = ()=>{ state.rhythm=!state.rhythm; render(); save(); }
 $("#btnArrange").onclick = ()=>runArrange("pending");
 $("#btnReflow").onclick  = ()=>runArrange("feed");
 $("#btnUndo").onclick    = undo;
+$("#btnRedo").onclick    = redo;
 $("#btnNums").onclick   = ()=>{ state.nums=!state.nums; render(); save(); };
 $("#btnSave").onclick = ()=>{
   saveNow();
@@ -3047,7 +3260,7 @@ $("#zipPicker").addEventListener("change", async e=>{
   await runSync(p => importExport({kind:"zip", file:f}, IG.limit, p));
 });
 /* the live-sync buttons are created by paintSyncModal(), which wires them as it goes */
-$("#inspClose").onclick = ()=>{ state.selId=null; state.cropId=null; render(); };
+$("#inspClose").onclick = ()=>{ state.selId=null; state.cropId=null; state.inspOpen=false; render(); };
 
 $("#filePicker").addEventListener("change", async e=>{
   const files = e.target.files;
@@ -3150,7 +3363,11 @@ document.addEventListener("keydown", e=>{
     return;
   }
   if(typing) return;
-  if((e.ctrlKey||e.metaKey) && e.key.toLowerCase() === "z"){ e.preventDefault(); undo(); return; }
+  if((e.ctrlKey||e.metaKey) && e.key.toLowerCase() === "z"){
+    e.preventDefault();
+    e.shiftKey ? redo() : undo();
+    return;
+  }
   if(!state.selId) return;
   const id = state.selId;
   if(e.key === "Delete" || e.key === "Backspace"){ e.preventDefault(); removeTile(id); }
