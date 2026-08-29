@@ -403,7 +403,7 @@
     background:rgba(6,6,8,.78);backdrop-filter:blur(4px);
     padding:28px 16px;overflow-y:auto;
   }
-  #syncModal.show{display:block;}
+  #syncModal.show, #cloudModal.show{display:block;}
   .sheet{
     max-width:560px;margin:0 auto;background:var(--panel);
     border:1px solid var(--line-2);border-radius:10px;
@@ -2186,7 +2186,8 @@ document.addEventListener("click", e=>{
   if(e.target.closest("#ctxMenu")) return;
   closeCtx();
   if(!e.target.closest("#inspector") && !e.target.closest("header") &&
-     !e.target.closest("#syncModal") && !e.target.closest("#sliceModal")){
+     !e.target.closest("#syncModal") && !e.target.closest("#cloudModal") &&
+     !e.target.closest("#sliceModal")){
     if(state.selId || state.cropId){ state.selId=null; state.cropId=null; state.inspOpen=false; render(); }
   }
 });
