@@ -600,6 +600,7 @@
   <button class="btn" id="btnRhythm" title="Grade every slot A–D and flag adjacent tiles that are both dark or both busy">Rhythm</button>
   <button class="btn" id="btnArrange" title="Slot your pending posts so tones alternate and clashes drop. Press again for a different take. Pinned and posted tiles never move.">Arrange</button>
   <button class="btn" id="btnReflow" title="Rearrange the already-posted tiles for better flow. Press again for a different variation. Pinned and pending tiles never move.">Reflow</button>
+  <button class="btn" id="btnPick" title="For every slot holding several options, promote the frame that reads best beside its neighbours.">Auto-pick</button>
   <button class="btn icon" id="btnUndo" title="Undo last change (Ctrl+Z)">↶</button>
   <button class="btn icon" id="btnRedo" title="Redo (Ctrl+Shift+Z)">↷</button>
   <div class="spacer"></div>
@@ -768,6 +769,11 @@
       </div>
       <div class="row-btns"><button class="btn primary" id="addPick">Choose files from your computer…</button></div>
       <p class="hint">They land in the staging tray, ready to drag into the grid.</p>
+      <hr>
+      <div class="row-btns"><button class="btn" id="addSets">Import a folder of sets…</button></div>
+      <p class="hint">Point this at your Dropbox pending folder. <b>Each subfolder becomes one
+        post</b>, the frames inside it become that slot's options (up to 8), and the frame that
+        reads best next to its neighbours is chosen for you.</p>
     </div>
   </div>
 </div>
@@ -783,6 +789,7 @@
 <input type="file" id="zipPicker" accept=".zip,application/zip" hidden />
 <input type="file" id="shotPicker" accept="image/*" hidden />
 <input type="file" id="altPicker" accept="image/*" multiple hidden />
+<input type="file" id="setsPicker" webkitdirectory directory multiple hidden />
 
 <!-- Starter feed: the current live grid, pre-sliced. Loads only on a first run with no
      saved plan; clearing or importing retires it for good. Inlined rather than fetched
@@ -1081,6 +1088,74 @@ function togglePin(id){
   }
   normaliseOrder();
   render(); save();
+}
+
+/* ---- import a folder of sets ----
+   Dropbox syncs to a local folder, so there is no API and no OAuth here: the browser
+   reads the already-synced copy. Each immediate subfolder is one intended post, and the
+   frames inside it are that slot's competing options. */
+async function importSets(fileList){
+  const files = [...fileList].filter(f => f.type.startsWith("image/"));
+  if(!files.length){ toast("No images found in that folder"); return; }
+
+  const groups = new Map();          // set name -> files
+  const loose = [];
+  for(const f of files){
+    const parts = normPath(f.webkitRelativePath || f.name).split("/");
+    if(parts.length > 2){            // parts[0] is the folder you picked
+      const key = parts.slice(1, -1).join(" / ");
+      if(!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(f);
+    }else{
+      loose.push(f);                 // a stray image at the top level is its own post
+    }
+  }
+  const byName = (a,b) => a.name.localeCompare(b.name, undefined, {numeric:true});
+  const sets = [...groups.entries()]
+    .sort((a,b) => a[0].localeCompare(b[0], undefined, {numeric:true}))
+    .map(([name, fs2]) => ({name, files: fs2.sort(byName)}));
+  for(const f of loose.sort(byName)) sets.push({name:"", files:[f]});
+
+  if(!sets.length){ toast("No sets found in that folder"); return; }
+  toast(`Reading ${sets.length} set${sets.length===1?"":"s"}…`);
+
+  lastHistPush = 0;                  // the whole import is one undo step
+  const fresh = [];
+  let skipped = 0, dropped = 0;
+  for(const set of sets){
+    const use = set.files.slice(0, MAX_OPTIONS);
+    dropped += set.files.length - use.length;
+    let it = null;
+    for(const f of use){
+      try{
+        const {src, w, h, hash} = await ingestBlob(f);
+        if(!it){
+          it = newItem({name:f.name, src, w, h, hash, note:set.name});
+          fresh.push(it.id);
+          await computeStats(it);
+        }else{
+          const alt = {name:f.name, src, remote:null, w, h, fx:50, fy:50,
+                       lum:null, busy:null, hash};
+          await computeStats(alt);
+          it.alts.push(alt);
+        }
+      }catch(_){ skipped++; }
+    }
+  }
+  if(!fresh.length){ toast("Couldn't read any images from that folder"); return; }
+
+  // pending posts belong at the head of the feed, under the pins
+  state.grid.splice(topSlot(), 0, ...fresh);
+  normaliseOrder();
+  const picked = autoPickFrames();
+  render(); save();
+
+  const opts = fresh.reduce((n,id) => n + 1 + state.items[id].alts.length, 0);
+  toast(`${fresh.length} set${fresh.length===1?"":"s"} · ${opts} frames · ` +
+        `${picked} slot${picked===1?"":"s"} auto-picked` +
+        (dropped ? ` · ${dropped} over the ${MAX_OPTIONS}-option limit` : "") +
+        (skipped ? ` · ${skipped} unreadable` : ""),
+        "Undo", undo);
 }
 
 async function addFiles(fileList){
@@ -1807,13 +1882,44 @@ async function addAlternates(id, files){
               : "Couldn't read those images");
 }
 /* swap a contender into the slot; the outgoing photo takes its place in the list */
-function useAlternate(id, i){
+/* swap without redrawing, so a batch pick can do many and render once */
+function swapAlternate(id, i){
   const it = state.items[id];
-  if(!it || !it.alts[i]) return;
+  if(!it || !it.alts[i]) return false;
   const incoming = it.alts[i];
   it.alts[i] = packPhoto(it);
   applyPhoto(it, incoming);
+  return true;
+}
+function useAlternate(id, i){
+  if(!swapAlternate(id, i)) return;
   render(); save();
+}
+
+/* For every slot holding options, promote whichever frame reads best in that exact
+   position. Picking changes a slot's neighbours, which changes what is best next door,
+   so repeat until nothing moves -- it settles in two or three passes. */
+function autoPickFrames(passes = 4){
+  let total = 0;
+  for(let p = 0; p < passes; p++){
+    const {darkT, busyT} = analyze();
+    let changed = 0;
+    state.grid.forEach((id, i) => {
+      const it = state.items[id];
+      if(!it || !it.alts || !it.alts.length) return;
+      const nb = neighboursAt(state.grid, i);
+      const opts = [packPhoto(it), ...it.alts];
+      let best = 0, bestScore = -Infinity;
+      opts.forEach((o, k) => {
+        const s = slotScore(o, nb, darkT, busyT);
+        if(s != null && s > bestScore){ bestScore = s; best = k; }
+      });
+      if(best > 0 && swapAlternate(id, best - 1)) changed++;
+    });
+    total += changed;
+    if(!changed) break;
+  }
+  return total;
 }
 function dropAlternate(id, i){
   const it = state.items[id];
@@ -3107,7 +3213,7 @@ document.addEventListener("click", e=>{ if(!e.target.closest(".menu-wrap")) clos
 const SCALE_STEPS = [1, 1.25, 1.6, 2];
 /* how much CSS space we actually have = viewport / zoom. Media queries cannot work
    this out, so the rail width and the stacked fallback are decided here. */
-const COMPACT_IDS = ["btnArrange","btnReflow","btnUndo","btnRedo","btnSave","btnSync"];
+const COMPACT_IDS = ["btnArrange","btnReflow","btnPick","btnUndo","btnRedo","btnSave","btnSync"];
 let compactNow = null;
 function applyCompactHeader(compact){
   if(compact === compactNow) return;
@@ -3186,6 +3292,15 @@ $("#btnScale").onclick = ()=>{
 $("#btnRhythm").onclick  = ()=>{ state.rhythm=!state.rhythm; render(); save(); };
 $("#btnArrange").onclick = ()=>runArrange("pending");
 $("#btnReflow").onclick  = ()=>runArrange("feed");
+$("#btnPick").onclick    = ()=>{
+  const stacks = state.grid.filter(id => (state.items[id].alts||[]).length).length;
+  if(!stacks){ toast("No slots have options to choose between"); return; }
+  lastHistPush = 0;
+  const n = autoPickFrames();
+  render(); save();
+  toast(n ? `Swapped ${n} slot${n===1?"":"s"} to a better frame`
+          : `Every slot already holds its best frame`, n ? "Undo" : null, n ? undo : null);
+};
 $("#btnUndo").onclick    = undo;
 $("#btnRedo").onclick    = redo;
 $("#btnNums").onclick   = ()=>{ state.nums=!state.nums; render(); save(); };
@@ -3200,6 +3315,14 @@ const closeAdd = ()=>$("#addModal").classList.remove("show");
 $("#btnUpload").onclick = ()=>{ replaceTarget=null; $("#addModal").classList.add("show"); };
 $("#addClose").onclick  = closeAdd;
 $("#addPick").onclick   = ()=>{ replaceTarget=null; $("#filePicker").click(); };
+$("#addSets").onclick   = ()=>$("#setsPicker").click();
+$("#setsPicker").addEventListener("change", async e=>{
+  const files = Array.from(e.target.files || []);
+  e.target.value = "";
+  if(!files.length) return;
+  closeAdd();
+  await importSets(files);
+});
 $("#addModal").addEventListener("click", e=>{ if(e.target.id==="addModal") closeAdd(); });
 (()=>{
   const ad = $("#addDrop");

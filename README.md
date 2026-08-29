@@ -67,6 +67,21 @@ view while you work the grid. On narrow screens it drops back underneath.
 | Quick actions | **Right-click any tile** for a compact menu: send to tray / place in grid, pin, planned-posted, crop, options, duplicate, remove. |
 
 
+### Importing a folder of sets (Dropbox)
+
+Pending shoots usually live as one folder per intended post. **Add photos → Import a
+folder of sets…**, point it at that folder, and each immediate subfolder becomes one
+planned post with its frames as that slot's options (up to 8). Loose images at the top
+level become a post each. The folder name is kept as the slot's note.
+
+Dropbox syncs to a local folder, so this reads the already-synced copy — **no Dropbox
+API, no OAuth, nothing to authorise**.
+
+Imported sets land at the head of the feed under the pins, and every slot is
+**auto-picked**: the frame that reads best beside its neighbours is promoted. Because
+picking one slot changes what its neighbours should be, it repeats until nothing moves.
+**Auto-pick** in the toolbar re-runs it any time.
+
 ### Trying several frames in one slot
 
 Shot a set and can't decide which frame earns the slot? Open a tile and use
