@@ -213,7 +213,13 @@ hours, so they won't survive a reload.
 Screenshot your profile grid, **Instagram → Pick screenshot**, and the app slices
 it back into tiles. No account type, no Meta app, no waiting for an export.
 
-It finds the grid on its own by looking for the gutters — the only full-length
+**If detection gets it wrong, type how many posts are in the shot** and it re-solves
+for the geometry that yields exactly that many rows, anchored to the first one. It
+also trims to that count, so asking for 3 imports the top row only. Asking for more
+posts than physically fit is capped, and says so rather than quietly shrinking the
+cells to make the number work.
+
+Otherwise it finds the grid on its own by looking for the gutters — the only full-length
 runs of near-constant colour in the image. Thresholds are computed *relative to
 each screenshot*, so a low-key, hard-flash feed doesn't read as "flat" and get
 mistaken for gutters. It then locks onto the grid by sliding a comb of the
