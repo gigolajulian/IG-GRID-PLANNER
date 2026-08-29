@@ -77,6 +77,10 @@ level become a post each. The folder name is kept as the slot's note.
 Dropbox syncs to a local folder, so this reads the already-synced copy — **no Dropbox
 API, no OAuth, nothing to authorise**.
 
+Subfolders named **POSTED**, archive, archived, rejects or rejected are skipped, as are
+hidden folders like `.dropbox.cache` — so the shots you have already published stay out
+of the pending list. The toast reports how many were passed over.
+
 Imported sets land at the head of the feed under the pins, and every slot is
 **auto-picked**: the frame that reads best beside its neighbours is promoted. Because
 picking one slot changes what its neighbours should be, it repeats until nothing moves.

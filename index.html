@@ -773,7 +773,8 @@
       <div class="row-btns"><button class="btn" id="addSets">Import a folder of sets…</button></div>
       <p class="hint">Point this at your Dropbox pending folder. <b>Each subfolder becomes one
         post</b>, the frames inside it become that slot's options (up to 8), and the frame that
-        reads best next to its neighbours is chosen for you.</p>
+        reads best next to its neighbours is chosen for you.
+        Folders named <b>POSTED</b>, archive, archived, rejects or rejected are skipped.</p>
     </div>
   </div>
 </div>
@@ -1094,16 +1095,27 @@ function togglePin(id){
    Dropbox syncs to a local folder, so there is no API and no OAuth here: the browser
    reads the already-synced copy. Each immediate subfolder is one intended post, and the
    frames inside it are that slot's competing options. */
+/* Folders that are never a pending set: already-posted work, and the hidden
+   bookkeeping folders Dropbox and the OS leave lying around. */
+const IGNORED_DIRS = new Set(["posted", "archive", "archived", "rejects", "rejected"]);
+
 async function importSets(fileList){
   const files = [...fileList].filter(f => f.type.startsWith("image/"));
   if(!files.length){ toast("No images found in that folder"); return; }
 
   const groups = new Map();          // set name -> files
   const loose = [];
+  let ignored = 0;
   for(const f of files){
     const parts = normPath(f.webkitRelativePath || f.name).split("/");
-    if(parts.length > 2){            // parts[0] is the folder you picked
-      const key = parts.slice(1, -1).join(" / ");
+    const dirs = parts.slice(1, -1);           // parts[0] is the folder you picked
+    // anything already posted, or a hidden/system folder, is not a pending set
+    if(dirs.some(d => IGNORED_DIRS.has(d.trim().toLowerCase()) || d.startsWith("."))){
+      ignored++;
+      continue;
+    }
+    if(dirs.length){
+      const key = dirs.join(" / ");
       if(!groups.has(key)) groups.set(key, []);
       groups.get(key).push(f);
     }else{
@@ -1153,6 +1165,7 @@ async function importSets(fileList){
   const opts = fresh.reduce((n,id) => n + 1 + state.items[id].alts.length, 0);
   toast(`${fresh.length} set${fresh.length===1?"":"s"} · ${opts} frames · ` +
         `${picked} slot${picked===1?"":"s"} auto-picked` +
+        (ignored ? ` · skipped ${ignored} in POSTED/archive folders` : "") +
         (dropped ? ` · ${dropped} over the ${MAX_OPTIONS}-option limit` : "") +
         (skipped ? ` · ${skipped} unreadable` : ""),
         "Undo", undo);
