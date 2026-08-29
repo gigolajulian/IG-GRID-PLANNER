@@ -398,7 +398,7 @@
   #btnRefresh.spin .ico{animation:spin .9s linear infinite;}
   @keyframes spin{to{transform:rotate(360deg);}}
 
-  #syncModal{
+  #syncModal, #cloudModal{
     position:fixed;inset:0;z-index:90;display:none;
     background:rgba(6,6,8,.78);backdrop-filter:blur(4px);
     padding:28px 16px;overflow-y:auto;
@@ -625,6 +625,7 @@
       <button id="btnNums">Always show slot numbers</button>
       <button id="btnScale">Interface size: 160%</button>
       <hr>
+      <button id="btnCloud">Cloud sync…</button>
       <button id="btnExport">Export plan…</button>
       <button id="btnImport">Import plan…</button>
       <button id="btnSeed">Reload starter feed</button>
@@ -787,6 +788,16 @@
 
 <div class="menu ctxmenu" id="ctxMenu" role="menu"></div>
 
+<div id="cloudModal">
+  <div class="sheet">
+    <div class="sheet-head">
+      <h2>Cloud sync</h2><div class="spacer"></div>
+      <button class="btn" id="syncClose2">Close</button>
+    </div>
+    <div class="sheet-body" id="syncBody"></div>
+  </div>
+</div>
+
 <div id="dropzone"><div>Drop photos to add<small>they land in the staging tray</small></div></div>
 <div id="toast"></div>
 
@@ -797,6 +808,12 @@
 <input type="file" id="shotPicker" accept="image/*" hidden />
 <input type="file" id="altPicker" accept="image/*" multiple hidden />
 <input type="file" id="setsPicker" webkitdirectory directory multiple hidden />
+
+<!-- Supabase project URL and PUBLIC (anon/publishable) key. Safe to commit: security is
+     the row-level policies in supabase-setup.sql, not secrecy of this key. Never put the
+     service_role key here. Inlined rather than fetched so it also works from file://.
+     Left blank, the app stays entirely offline and no sync UI appears. -->
+<script type="application/json" id="syncConfig">{"url":"","anonKey":""}</script>
 
 <!-- Starter feed: the current live grid, pre-sliced. Loads only on a first run with no
      saved plan; clearing or importing retires it for good. Inlined rather than fetched
@@ -929,6 +946,7 @@ function saveNow(){
     if(state.imagesDropped){ state.imagesDropped = false; }
     lastSavedAt = Date.now(); saveDirty = false; saveFailed = false;
     updateSaveUI();
+    syncAfterSave();
     hideBanner();
   }catch(err){
     saveFailed = true; saveDirty = false; updateSaveUI();
@@ -3688,6 +3706,210 @@ function maybeSeed(force){
   return true;
 }
 
+/* ============================ cloud sync ============================ */
+/* One JSON file per account in Supabase Storage at <uid>/<profileId>.json, plus a
+   <uid>/profiles.json manifest so a new device learns which accounts exist. localStorage
+   stays the source of truth; this is a mirror. Signed out, none of it runs. */
+const SYNC = { client:null, user:null, busy:false, lastPull:0, lastPush:0, status:"" };
+
+function syncConfig(){
+  try{
+    const c = JSON.parse($("#syncConfig").textContent);
+    return (c && c.url && c.anonKey) ? c : null;
+  }catch(_){ return null; }
+}
+const syncConfigured = () => !!syncConfig();
+
+async function sbClient(){
+  if(SYNC.client) return SYNC.client;
+  const cfg = syncConfig();
+  if(!cfg) throw new Error("Cloud sync isn't configured in this build.");
+  let mod;
+  try{
+    mod = await import("https://esm.sh/@supabase/supabase-js@2");
+  }catch(_){
+    throw new Error("Couldn't load the sync library — check your connection.");
+  }
+  SYNC.client = mod.createClient(cfg.url, cfg.anonKey, {
+    auth:{ persistSession:true, autoRefreshToken:true, detectSessionInUrl:true }
+  });
+  return SYNC.client;
+}
+
+const planPath     = id => SYNC.user.id + "/" + id + ".json";
+const manifestPath = () => SYNC.user.id + "/profiles.json";
+
+async function syncSession(){
+  if(!syncConfigured()) return null;
+  try{
+    const sb = await sbClient();
+    const {data} = await sb.auth.getSession();
+    SYNC.user = data && data.session ? data.session.user : null;
+    return SYNC.user;
+  }catch(_){ return null; }
+}
+
+async function syncSignIn(email){
+  const sb = await sbClient();
+  const {error} = await sb.auth.signInWithOtp({
+    email, options:{ emailRedirectTo: location.origin + location.pathname }
+  });
+  if(error) throw new Error(error.message);
+}
+async function syncSignOut(){
+  try{ const sb = await sbClient(); await sb.auth.signOut(); }catch(_){ }
+  SYNC.user = null; SYNC.status = "";
+  renderSyncUI();
+  toast("Signed out of cloud sync");
+}
+
+function lastSavedPlanStamp(){
+  try{
+    const raw = localStorage.getItem(planKey(state.profileId));
+    return raw ? (JSON.parse(raw).savedAt || null) : null;
+  }catch(_){ return null; }
+}
+
+async function syncPush(){
+  if(!SYNC.user || SYNC.busy) return false;
+  SYNC.busy = true;
+  try{
+    const sb = await sbClient();
+    const put = (path, obj) => sb.storage.from("plans").upload(
+      path, new Blob([JSON.stringify(obj)], {type:"application/json"}),
+      {upsert:true, contentType:"application/json"});
+    let r = await put(planPath(state.profileId), serialize(true));
+    if(r.error) throw new Error(r.error.message);
+    r = await put(manifestPath(), {profiles, savedAt:new Date().toISOString()});
+    if(r.error) throw new Error(r.error.message);
+    SYNC.lastPush = Date.now(); SYNC.status = "";
+    renderSyncUI();
+    return true;
+  }catch(e){
+    SYNC.status = e.message || String(e);
+    renderSyncUI();
+    return false;
+  }finally{ SYNC.busy = false; }
+}
+
+async function syncFetch(path){
+  const sb = await sbClient();
+  const {data, error} = await sb.storage.from("plans").download(path);
+  if(error) return null;                       // absent is normal on a fresh account
+  try{ return JSON.parse(await data.text()); }catch(_){ return null; }
+}
+
+/* Never overwrites silently: if the cloud copy is newer and this device also has work,
+   ask which one wins. */
+async function syncPull(opts){
+  const silent = opts && opts.silent;
+  if(!SYNC.user || SYNC.busy) return false;
+  SYNC.busy = true;
+  try{
+    const man = await syncFetch(manifestPath());
+    if(man && Array.isArray(man.profiles) && man.profiles.length){
+      const known = new Set(profiles.map(p => p.id));
+      let added = 0;
+      for(const p of man.profiles) if(p && p.id && !known.has(p.id)){ profiles.push(p); added++; }
+      if(added){ saveProfiles(); renderProfiles(); }
+    }
+    const remote = await syncFetch(planPath(state.profileId));
+    if(!remote){ if(!silent) toast("Nothing in the cloud for this account yet"); return false; }
+
+    const localAt  = Date.parse(lastSavedPlanStamp() || 0) || 0;
+    const remoteAt = Date.parse(remote.savedAt || 0) || 0;
+    if(remoteAt <= localAt){ if(!silent) toast("Already up to date"); return false; }
+
+    if((state.grid.length || state.tray.length) && localAt && !silent){
+      const takeIt = confirm(
+        "The cloud copy of @" + activeProfile().handle + " is newer (" +
+        new Date(remoteAt).toLocaleString() + ").\n\n" +
+        "OK — replace this device\'s version with it.\n" +
+        "Cancel — keep this device\'s version and push it up instead.");
+      if(!takeIt){ SYNC.busy = false; return await syncPush(); }
+    }
+    adopt(remote);
+    render();
+    prevSnap = takeSnap();
+    clearTimeout(saveTimer); saveNow();
+    SYNC.lastPull = Date.now();
+    renderSyncUI();
+    toast("Pulled the cloud copy of this account");
+    return true;
+  }catch(e){
+    SYNC.status = e.message || String(e);
+    renderSyncUI();
+    return false;
+  }finally{ SYNC.busy = false; }
+}
+
+/* mirror upward once a local save settles, so editing doesn't spam uploads */
+let pushTimer = null;
+function syncAfterSave(){
+  if(!SYNC.user) return;
+  clearTimeout(pushTimer);
+  pushTimer = setTimeout(()=>syncPush(), 2500);
+}
+
+/* ---- sync UI ---- */
+function renderSyncUI(){
+  const body = $("#syncBody");
+  if(!body) return;
+  const stamp = t => t ? new Date(t).toLocaleTimeString() : "—";
+  if(!syncConfigured()){
+    body.innerHTML =
+      `<p class="hint">This build has no Supabase project attached, so the app is running
+        entirely offline — which is a perfectly good way to use it.</p>
+       <p class="hint">To turn sync on: create a free Supabase project, run
+        <b>supabase-setup.sql</b> in its SQL editor, then put the project URL and the
+        public (anon) key into the <b>syncConfig</b> block at the bottom of index.html.</p>`;
+    return;
+  }
+  if(!SYNC.user){
+    body.innerHTML =
+      `<p class="hint">Sign in and this account's plan — photos included — follows you to
+        your phone and back. You get a one-time link by email; there is no password.</p>
+       <div class="field">
+         <label>Email</label>
+         <input type="email" id="syncEmail" placeholder="you@example.com" autocomplete="email">
+       </div>
+       <div class="row-btns"><button class="btn primary" id="syncSend">Email me a sign-in link</button></div>
+       <div class="sync-status" id="syncMsg">${esc(SYNC.status || "")}</div>`;
+    $("#syncSend").onclick = async ()=>{
+      const email = ($("#syncEmail").value || "").trim();
+      if(!email){ $("#syncMsg").textContent = "Enter your email first."; return; }
+      $("#syncMsg").textContent = "Sending…";
+      try{
+        await syncSignIn(email);
+        $("#syncMsg").innerHTML = "Check <b>" + esc(email) + "</b> and open the link on this device.";
+      }catch(e){ $("#syncMsg").textContent = e.message || String(e); }
+    };
+    return;
+  }
+  body.innerHTML =
+    `<p class="connected">✓ Signed in as <b>${esc(SYNC.user.email || "")}</b></p>
+     <div class="kv"><span>account</span><b>@${esc(activeProfile().handle)}</b></div>
+     <div class="kv"><span>last upload</span><b>${stamp(SYNC.lastPush)}</b></div>
+     <div class="kv"><span>last download</span><b>${stamp(SYNC.lastPull)}</b></div>
+     <p class="hint">Edits upload a couple of seconds after they're saved. This device's
+       copy stays the source of truth — signed out, nothing changes.</p>
+     <div class="row-btns">
+       <button class="btn primary" id="syncUp">Upload this account</button>
+       <button class="btn" id="syncDown">Download from cloud</button>
+     </div>
+     <div class="row-btns"><button class="btn danger" id="syncOut">Sign out</button></div>
+     <div class="sync-status ${SYNC.status ? "err" : ""}" id="syncMsg">${esc(SYNC.status || "")}</div>`;
+  $("#syncUp").onclick   = async ()=>{ $("#syncMsg").textContent = "Uploading…";
+                                       $("#syncMsg").textContent = await syncPush() ? "Uploaded." : (SYNC.status || "Upload failed."); };
+  $("#syncDown").onclick = async ()=>{ $("#syncMsg").textContent = "Checking…"; await syncPull({}); };
+  $("#syncOut").onclick  = syncSignOut;
+}
+
+$("#btnCloud").onclick  = async ()=>{ $("#cloudModal").classList.add("show"); renderSyncUI();
+                                      await syncSession(); renderSyncUI(); };
+$("#syncClose2").onclick = ()=>$("#cloudModal").classList.remove("show");
+$("#cloudModal").addEventListener("click", e=>{ if(e.target.id === "cloudModal") e.currentTarget.classList.remove("show"); });
+
 /* ============================ boot ============================ */
 loadProfiles();
 load();
@@ -3700,6 +3922,15 @@ renderProfiles();
 if(!scaleFromSave && window.innerWidth < 900) state.scale = 1;
 applyScale();
 updateSaveUI();
+
+/* returning from a magic link, or a session already stored: pull quietly */
+(async ()=>{
+  if(!syncConfigured()) return;
+  const user = await syncSession();
+  if(!user) return;
+  renderSyncUI();
+  await syncPull({silent:true});
+})();
 
 (async ()=>{
   const s = await refreshServerState();
