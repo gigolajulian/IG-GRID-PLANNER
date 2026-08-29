@@ -22,6 +22,17 @@ Everything lives in that one file. Your plan is saved to the browser's
 but it is tied to **that browser on that machine**, so use **Export** for
 real backups.
 
+## Multiple accounts
+
+The button at the top left shows the account you are planning (). Click it
+to switch, or to **add**, **rename** or **delete** an account. Each account keeps its own
+grid, tray, options, Instagram connection and settings — nothing crosses over.
+
+Plans are stored one per account under , with the account list
+in . A plan made by the earlier single-account build is
+migrated automatically on first load; the old  key is **copied, not
+moved**, so nothing is lost if you go back.
+
 ## The starter feed
 
 Your current 12-post grid is **baked into `index.html`** already sliced, with the
@@ -34,6 +45,7 @@ the file.
 
 Rules it follows:
 
+- It seeds **only your first account** — a second account starts genuinely empty.
 - It loads **only on a genuinely empty first run**. If you have any plan saved, it
   stays out of the way — it can never overwrite your work.
 - Once it has loaded once, or once you hit **Clear everything**, it's retired and

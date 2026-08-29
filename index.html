@@ -450,6 +450,8 @@
     position:fixed;top:0;left:0;right:auto;min-width:184px;max-width:240px;z-index:120;
     box-shadow:0 18px 40px -16px #000, 0 0 0 1px rgba(0,0,0,.5);
   }
+  #profileMenu{right:auto;left:0;min-width:190px;}
+  #btnProfile{max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .ctxmenu .ctx-head{
     padding:7px 10px 6px;font-size:10px;letter-spacing:.7px;text-transform:uppercase;
     color:var(--txt-faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:210px;
@@ -592,6 +594,10 @@
 
 <header>
   <div class="brand">GRID&nbsp;PLANNER</div>
+  <div class="menu-wrap" id="profileWrap">
+    <button class="btn" id="btnProfile" title="Switch account">@account</button>
+    <div class="menu" id="profileMenu" role="menu"></div>
+  </div>
   <div class="seg" id="viewSeg">
     <button data-view="phone">Phone</button>
     <button data-view="desktop">Desktop</button>
@@ -801,7 +807,47 @@
 "use strict";
 
 /* ============================ state ============================ */
-const KEY = "ig-grid-planner-v1";
+const KEY = "ig-grid-planner-v1";               // legacy single-plan key, kept for migration
+const PROFILES_KEY = "ig-grid-planner-profiles";
+const ACTIVE_KEY   = "ig-grid-planner-active";
+/* One plan per account. The plan object's own shape is unchanged -- only where it is
+   stored moves -- so everything that reads or writes a plan keeps working. */
+const planKey = id => `ig-grid-planner-v2:${id}`;
+const seedFlagFor = id => planKey(id) + "-seeded";
+let profiles = [];
+
+const activeProfile = () => profiles.find(p => p.id === state.profileId) || profiles[0];
+
+function saveProfiles(){
+  try{
+    localStorage.setItem(PROFILES_KEY, JSON.stringify(profiles));
+    localStorage.setItem(ACTIVE_KEY, state.profileId || "");
+  }catch(_){ }
+}
+
+/* First run under the profile model adopts whatever the single-plan build left behind.
+   The old key is copied, not moved, so a downgrade still finds its plan. */
+function loadProfiles(){
+  let list = null;
+  try{ list = JSON.parse(localStorage.getItem(PROFILES_KEY)); }catch(_){ }
+  if(Array.isArray(list) && list.length){
+    profiles = list.filter(p => p && p.id);
+  }else{
+    const id = uid();
+    profiles = [{id, handle:"your.feed", createdAt:Date.now()}];
+    try{
+      const legacy = localStorage.getItem(KEY);
+      if(legacy){
+        localStorage.setItem(planKey(id), legacy);
+        if(localStorage.getItem(KEY + "-seeded")) localStorage.setItem(seedFlagFor(id), "1");
+      }
+    }catch(_){ }
+  }
+  let active = null;
+  try{ active = localStorage.getItem(ACTIVE_KEY); }catch(_){ }
+  state.profileId = profiles.some(p => p.id === active) ? active : profiles[0].id;
+  saveProfiles();
+}
 const MAX_DIM = 1000;          // longest edge stored, keeps localStorage sane
 const JPEG_Q  = 0.82;
 const AR      = 3/4;           // Instagram feed thumbnail ratio (w:h)
@@ -810,6 +856,7 @@ const state = {
   items: {},      // id -> {id,name,src,w,h,fx,fy,posted,note,lum,busy}
   grid: [],       // ids, index 0 = newest = top-left
   tray: [],       // ids not yet slotted
+  profileId: null,   // which account's plan is loaded
   view: "phone",
   rhythm: true,
   nums: false,
@@ -878,7 +925,7 @@ function save(){
 function saveNow(){
   clearTimeout(saveTimer);
   try{
-    localStorage.setItem(KEY, JSON.stringify(serialize(true)));
+    localStorage.setItem(planKey(state.profileId), JSON.stringify(serialize(true)));
     if(state.imagesDropped){ state.imagesDropped = false; }
     lastSavedAt = Date.now(); saveDirty = false; saveFailed = false;
     updateSaveUI();
@@ -887,7 +934,7 @@ function saveNow(){
     saveFailed = true; saveDirty = false; updateSaveUI();
     // quota blown — keep the plan (order/crops/notes/state) without the pixels
     try{
-      localStorage.setItem(KEY, JSON.stringify(serialize(false)));
+      localStorage.setItem(planKey(state.profileId), JSON.stringify(serialize(false)));
       state.imagesDropped = true;
       showBanner(
         "Storage quota exceeded — your layout, crops and notes are saved, but the <b>photos are not</b>. " +
@@ -895,14 +942,14 @@ function saveNow(){
         true
       );
     }catch(_){
-      try{ localStorage.removeItem(KEY); }catch(__){}
+      try{ localStorage.removeItem(planKey(state.profileId)); }catch(__){}
       showBanner("Storage quota exceeded and nothing could be saved to this browser. Export your plan now — closing this tab will lose it.", true);
     }
   }
 }
 function load(){
   let raw;
-  try{ raw = localStorage.getItem(KEY); }catch(_){ return; }
+  try{ raw = localStorage.getItem(planKey(state.profileId)); }catch(_){ return; }
   if(!raw) return;
   try{ adopt(JSON.parse(raw)); }catch(_){ }
   if(state.imagesDropped){
@@ -3212,6 +3259,20 @@ $("#viewSeg").addEventListener("click", e=>{
   state.view = b.dataset.view; render(); save();
 });
 const closeMenu = ()=>{ $("#menu").classList.remove("show"); $("#btnMenu").setAttribute("aria-expanded","false"); };
+const closeProfileMenu = ()=>$("#profileMenu").classList.remove("show");
+$("#btnProfile").onclick = e=>{
+  e.stopPropagation(); closeMenu();
+  $("#profileMenu").classList.toggle("show");
+};
+$("#profileMenu").addEventListener("click", e=>{
+  const b = e.target.closest("button"); if(!b) return;
+  e.stopPropagation(); closeProfileMenu();
+  if(b.dataset.pid) switchProfile(b.dataset.pid);
+  else if(b.dataset.pact === "add") addProfile();
+  else if(b.dataset.pact === "rename") renameProfile();
+  else if(b.dataset.pact === "delete") deleteProfile();
+});
+document.addEventListener("click", e=>{ if(!e.target.closest("#profileWrap")) closeProfileMenu(); });
 $("#btnMenu").onclick = e=>{
   e.stopPropagation();
   const open = $("#menu").classList.toggle("show");
@@ -3226,7 +3287,7 @@ document.addEventListener("click", e=>{ if(!e.target.closest(".menu-wrap")) clos
 const SCALE_STEPS = [1, 1.25, 1.6, 2];
 /* how much CSS space we actually have = viewport / zoom. Media queries cannot work
    this out, so the rail width and the stacked fallback are decided here. */
-const COMPACT_IDS = ["btnArrange","btnReflow","btnPick","btnUndo","btnRedo","btnSave","btnSync"];
+const COMPACT_IDS = ["btnRhythm","btnArrange","btnReflow","btnPick","btnUndo","btnRedo","btnSave","btnSync"];
 let compactNow = null;
 function applyCompactHeader(compact){
   if(compact === compactNow) return;
@@ -3257,7 +3318,7 @@ function applyCompactHeader(compact){
   }
   /* the four survivors still total more than a 375px row, so shorten the two widest.
      The segment keeps its data-view values, which is all the toggle logic reads. */
-  const shorten = {btnUpload:"Add", btnRhythm:"Fit"};
+  const shorten = {btnUpload:"Add"};   // btnRhythm now lives in the menu when compact
   for(const [id, short] of Object.entries(shorten)){
     const el = document.getElementById(id);
     if(!el) continue;
@@ -3442,7 +3503,7 @@ $("#btnClear").onclick = ()=>{
   if(!confirm("Delete all photos and the whole plan? This cannot be undone — export first if unsure.")) return;
   state.items = {}; state.grid = []; state.tray = [];
   state.selId = null; state.cropId = null;
-  try{ localStorage.removeItem(KEY); }catch(_){}
+  try{ localStorage.removeItem(planKey(state.profileId)); }catch(_){}
   hideBanner(); render(); save();
 };
 
@@ -3520,8 +3581,85 @@ document.addEventListener("keydown", e=>{
 
 window.addEventListener("beforeunload", ()=>{ clearTimeout(saveTimer); try{ saveNow(); }catch(_){} });
 
+/* ============================ accounts ============================ */
+function resetPlanState(){
+  state.items = {}; state.grid = []; state.tray = [];
+  state.selId = null; state.cropId = null; state.inspOpen = false;
+  state.imagesDropped = false;
+  IG.mode = null; IG.token = ""; IG.lastSync = null;
+  history = []; future = []; prevSnap = null; lastHistPush = 0;
+  recentArrangements = {pending:[], feed:[]};
+}
+
+function switchProfile(id){
+  if(!profiles.some(p => p.id === id) || id === state.profileId) return;
+  clearTimeout(saveTimer);
+  saveNow();                       // never lose the account you are leaving
+  state.profileId = id;
+  saveProfiles();
+  resetPlanState();
+  load();
+  maybeSeed();
+  render();
+  prevSnap = takeSnap();
+  updateSaveUI(); renderProfiles();
+  toast(`Switched to @${activeProfile().handle}`);
+}
+
+function addProfile(){
+  const handle = (prompt("Instagram handle for the new account", "second.account") || "").trim();
+  if(!handle) return;
+  clearTimeout(saveTimer); saveNow();
+  const p = {id:uid(), handle:handle.replace(/^@/,""), createdAt:Date.now()};
+  profiles.push(p);
+  state.profileId = p.id;
+  saveProfiles();
+  resetPlanState();
+  render();                        // a new account starts genuinely empty
+  prevSnap = takeSnap();
+  save(); updateSaveUI(); renderProfiles();
+  toast(`Added @${p.handle}`);
+}
+
+function renameProfile(){
+  const p = activeProfile(); if(!p) return;
+  const handle = (prompt("Rename this account", p.handle) || "").trim();
+  if(!handle) return;
+  p.handle = handle.replace(/^@/,"");
+  saveProfiles(); renderProfiles();
+}
+
+function deleteProfile(){
+  const p = activeProfile(); if(!p) return;
+  if(profiles.length < 2){ toast("That's your only account"); return; }
+  if(!confirm(`Delete @${p.handle} and its whole plan? Export it first if you might want it back.`)) return;
+  try{ localStorage.removeItem(planKey(p.id)); localStorage.removeItem(seedFlagFor(p.id)); }catch(_){ }
+  profiles = profiles.filter(x => x.id !== p.id);
+  state.profileId = profiles[0].id;
+  saveProfiles();
+  resetPlanState();
+  load(); render();
+  prevSnap = takeSnap(); updateSaveUI(); renderProfiles();
+  toast(`Deleted @${p.handle}`);
+}
+
+function renderProfiles(){
+  const btn = $("#btnProfile"), menu = $("#profileMenu");
+  if(!btn || !menu) return;
+  const active = activeProfile();
+  btn.textContent = "@" + (active ? active.handle : "account");
+  menu.innerHTML =
+    profiles.map(p =>
+      `<button data-pid="${p.id}" class="${p.id===state.profileId?"on":""}">@${esc(p.handle)}</button>`
+    ).join("") +
+    `<hr>
+     <button data-pact="add">Add an account…</button>
+     <button data-pact="rename">Rename @${esc(active ? active.handle : "")}…</button>
+     <button data-pact="delete" class="danger">Delete this account…</button>`;
+}
+
 /* ============================ starter feed ============================ */
-const SEED_FLAG = KEY + "-seeded";
+
 
 function readSeed(){
   const el = $("#seedPlan");
@@ -3534,12 +3672,13 @@ function readSeed(){
 function maybeSeed(force){
   if(!force){
     if(state.grid.length || state.tray.length) return false;
-    try{ if(localStorage.getItem(SEED_FLAG)) return false; }catch(_){ }
+    if(!profiles.length || state.profileId !== profiles[0].id) return false;
+    try{ if(localStorage.getItem(seedFlagFor(state.profileId))) return false; }catch(_){ }
   }
   const data = readSeed();
   if(!data) return false;
   try{ adopt(data); }catch(_){ return false; }
-  try{ localStorage.setItem(SEED_FLAG, "1"); }catch(_){ }
+  try{ localStorage.setItem(seedFlagFor(state.profileId), "1"); }catch(_){ }
   render();
   // stats aren't baked into the seed; fill them in so the rhythm overlay works immediately
   (async ()=>{
@@ -3550,11 +3689,13 @@ function maybeSeed(force){
 }
 
 /* ============================ boot ============================ */
+loadProfiles();
 load();
 render();
 if(!maybeSeed()) render();
-try{ if(localStorage.getItem(KEY)) lastSavedAt = Date.now(); }catch(_){ }
+try{ if(localStorage.getItem(planKey(state.profileId))) lastSavedAt = Date.now(); }catch(_){ }
 prevSnap = takeSnap();
+renderProfiles();
 // 160% suits a desktop; on a phone it just means endless scrolling
 if(!scaleFromSave && window.innerWidth < 900) state.scale = 1;
 applyScale();
