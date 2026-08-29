@@ -24,13 +24,13 @@ real backups.
 
 ## Multiple accounts
 
-The button at the top left shows the account you are planning (). Click it
+The button at the top left shows the account you are planning (`@your.feed`). Click it
 to switch, or to **add**, **rename** or **delete** an account. Each account keeps its own
 grid, tray, options, Instagram connection and settings — nothing crosses over.
 
-Plans are stored one per account under , with the account list
-in . A plan made by the earlier single-account build is
-migrated automatically on first load; the old  key is **copied, not
+Plans are stored one per account under `ig-grid-planner-v2:<id>`, with the account list
+in `ig-grid-planner-profiles`. A plan made by the earlier single-account build is
+migrated automatically on first load; the old `ig-grid-planner-v1` key is **copied, not
 moved**, so nothing is lost if you go back.
 
 ## The starter feed
