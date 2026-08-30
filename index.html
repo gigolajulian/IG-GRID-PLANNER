@@ -428,6 +428,7 @@
   #cloudModal.show, #tplModal.show, #verModal.show{display:grid;place-items:center;}
   #tplModal .sheet, #verModal .sheet{max-width:520px;width:100%;margin:0;}
   #tplText{min-height:120px;font-family:ui-monospace,Consolas,monospace;font-size:12.5px;}
+  .hint.warn{color:var(--warn,#e0a33a);}
   .tpl-preview{
     white-space:pre-wrap;background:var(--panel-2);border:1px solid var(--line-2);
     border-radius:5px;padding:9px 10px;font-size:12.5px;color:var(--txt-dim);min-height:40px;
@@ -963,6 +964,146 @@ const uid = () => Math.random().toString(36).slice(2,10) + Date.now().toString(3
 const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
 const esc = s => String(s??"").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 
+/* ============================ photo store ============================ */
+/* Photos used to live as base64 inside the plan JSON in localStorage, which capped the
+   whole app at ~5MB, inflated every image by a third, and rewrote every byte on every
+   save. They now live as Blobs in IndexedDB, one record each: no meaningful size limit,
+   no encoding overhead, and nudging a tile writes a few hundred bytes instead of megabytes.
+
+   In memory nothing changes — it.src is still a URL you can put in an <img>. It is just
+   an object URL over a Blob rather than a data: URL, so the rest of the app is untouched. */
+const PHOTO_DB = "gridplanner-photos";
+
+function pdb(){
+  return new Promise((res, rej) => {
+    const r = indexedDB.open(PHOTO_DB, 1);
+    r.onupgradeneeded = () => {
+      const db = r.result;
+      if(!db.objectStoreNames.contains("photos")) db.createObjectStore("photos");
+      if(!db.objectStoreNames.contains("plans"))  db.createObjectStore("plans");
+    };
+    r.onsuccess = () => res(r.result);
+    r.onerror  = () => rej(r.error);
+  });
+}
+function pdbDo(store, mode, fn){
+  return pdb().then(db => new Promise((res, rej) => {
+    const tx = db.transaction(store, mode);
+    const os = tx.objectStore(store);
+    let out;
+    try{ out = fn(os); }catch(e){ rej(e); return; }
+    tx.oncomplete = () => res(out && out.result !== undefined ? out.result : out);
+    tx.onerror    = () => rej(tx.error);
+    tx.onabort    = () => rej(tx.error);
+  }));
+}
+const photoPut = (id, blob) => pdbDo("photos", "readwrite", os => os.put(blob, id));
+const photoGet = id         => pdbDo("photos", "readonly",  os => os.get(id));
+const photoDel = id         => pdbDo("photos", "readwrite", os => os.delete(id));
+const photoKeys = ()        => pdbDo("photos", "readonly",  os => os.getAllKeys());
+const planPut  = (id, obj)  => pdbDo("plans",  "readwrite", os => os.put(obj, id));
+const planKeysAll = ()    => pdbDo("plans",  "readonly",  os => os.getAllKeys());
+const planGetAll  = ()    => pdbDo("plans",  "readonly",  os => os.getAll());
+
+/* Removing a tile must not delete its photo — Undo would have nothing to restore. Orphans
+   are swept on the next boot instead, once no stored plan refers to them any more. */
+async function gcPhotos(){
+  try{
+    const plans = await planGetAll();
+    const live = new Set();
+    for(const p of plans || []) for(const id in (p && p.items) || {}) live.add(id);
+    for(const id in state.items) live.add(id);
+    const keys = await photoKeys();
+    let freed = 0;
+    for(const k of keys || []) if(!live.has(k)){ await photoDel(k); freed++; }
+    return freed;
+  }catch(_){ return 0; }
+}
+const planGet  = id         => pdbDo("plans",  "readonly",  os => os.get(id));
+
+/* Chrome may evict "best effort" storage when the disk fills. Asking once makes the
+   plan durable; being refused is not an error, just a weaker promise. */
+async function askPersistence(){
+  try{
+    if(navigator.storage && navigator.storage.persist && !(await navigator.storage.persisted()))
+      await navigator.storage.persist();
+  }catch(_){ }
+}
+
+const dataUrlToBlob = async url => (await fetch(url)).blob();
+function blobToDataUrl(blob){
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result);
+    r.onerror = () => rej(r.error);
+    r.readAsDataURL(blob);
+  });
+}
+
+/* Object URLs are revoked when the photo they point at is replaced or removed, so a long
+   editing session doesn't leak every image it has ever shown. */
+const objectUrls = new Map();
+function urlForBlob(id, blob){
+  const old = objectUrls.get(id);
+  if(old) URL.revokeObjectURL(old);
+  const url = URL.createObjectURL(blob);
+  objectUrls.set(id, url);
+  return url;
+}
+function forgetPhoto(id){
+  const old = objectUrls.get(id);
+  if(old){ URL.revokeObjectURL(old); objectUrls.delete(id); }
+  photoDel(id).catch(()=>{});
+}
+
+/* Write any photo the store doesn't have yet. Blobs are content we already hold, so this
+   is a copy, never a re-encode. */
+const photoSrcSeen = new Map();   // id -> the src we last wrote, so a replaced photo is noticed
+async function persistPhotos(){
+  const have = new Set(await photoKeys().catch(()=>[]));
+  for(const id in state.items){
+    const it = state.items[id];
+    if(!it.src) continue;
+    if(have.has(id) && photoSrcSeen.get(id) === it.src) continue;
+    try{
+      const blob = it.src.startsWith("blob:") ? await (await fetch(it.src)).blob()
+                                              : await dataUrlToBlob(it.src);
+      await photoPut(id, blob);
+      if(!it.src.startsWith("blob:")) it.src = urlForBlob(id, blob);   // drop the base64 copy
+      photoSrcSeen.set(id, it.src);
+    }catch(_){ }                                                        // a failed photo is not a failed save
+  }
+}
+
+/* Rehydrate after a load: every item that has a stored photo gets a usable src back. */
+async function restorePhotos(){
+  for(const id in state.items){
+    const it = state.items[id];
+    if(it.src) continue;
+    try{
+      const blob = await photoGet(id);
+      if(blob){ it.src = urlForBlob(id, blob); photoSrcSeen.set(id, it.src); }
+    }catch(_){ }
+  }
+}
+
+/* The portable form: base64 inline, as every export, folder file and cloud upload needs.
+   Async because the bytes now live in a store rather than in the plan object. */
+async function serializeFull(forExport){
+  const out = serialize(false, forExport);
+  out.imagesDropped = false;
+  for(const id in out.items){
+    const it = state.items[id];
+    if(!it || !it.src) continue;
+    try{
+      const blob = it.src.startsWith("blob:") ? await (await fetch(it.src)).blob()
+                                              : await dataUrlToBlob(it.src);
+      out.items[id].src = await blobToDataUrl(blob);
+    }catch(_){ }
+  }
+  return out;
+}
+
 /* ============================ persistence ============================ */
 function serialize(withImages, forExport){
   const items = {};
@@ -983,6 +1124,10 @@ function serialize(withImages, forExport){
 }
 
 let saveTimer = null, lastSavedAt = null, saveDirty = false, saveFailed = false;
+/* Nothing may be written until the stored plan has been read. An autosave that lands
+   during boot would persist the empty state the app starts in, over the real plan. */
+let bootReady = false;
+let allowEmptySave = false;   // set only by an explicit Clear / delete
 
 /* The plan autosaves constantly; this just makes that visible, because "is my work
    safe?" is not a question you should have to answer by guessing. */
@@ -1009,50 +1154,82 @@ function save(){
   clearTimeout(saveTimer);
   saveTimer = setTimeout(saveNow, 350);
 }
-function saveNow(){
+async function saveNow(){
   clearTimeout(saveTimer);
-  const full = JSON.stringify(serialize(true));
-  /* A connected folder has no quota, so it is the durable copy. Fire it first and always,
-     whatever localStorage then does. */
-  folderWrite(full);
+  if(!bootReady) return;
+  /* Never let an empty session overwrite a stored plan that still has photos in it.
+     Emptiness is almost always a load that went wrong, not work you did. Clearing on
+     purpose sets allowEmptySave, which is the only way this can happen. */
+  if(!allowEmptySave && !Object.keys(state.items).length){
+    try{
+      const stored = await planGet(state.profileId);
+      if(stored && stored.items && Object.keys(stored.items).length){
+        saveDirty = false; updateSaveUI();
+        return;
+      }
+    }catch(_){ }
+  }
+  /* Structure first and separately from pixels: this is the write that happens on every
+     nudge, and it is now a few hundred bytes rather than the whole feed. */
+  const plan = serialize(false);
   try{
-    // with a folder connected, localStorage is only a fast index — the pixels live on disk
-    localStorage.setItem(planKey(state.profileId),
-                         FS.handle ? JSON.stringify(serialize(false)) : full);
-    if(state.imagesDropped && !FS.handle){ state.imagesDropped = false; }
+    await planPut(state.profileId, plan);
+    await persistPhotos();
     lastSavedAt = Date.now(); saveDirty = false; saveFailed = false;
+    state.imagesDropped = false;
     updateSaveUI();
     hideBanner();
   }catch(err){
     saveFailed = true; saveDirty = false; updateSaveUI();
-    // quota blown — keep the plan (order/crops/notes/state) without the pixels
-    try{
-      localStorage.setItem(planKey(state.profileId), JSON.stringify(serialize(false)));
-      state.imagesDropped = true;
-      showBanner(
-        "Storage quota exceeded — your layout, crops and notes are saved, but the <b>photos are not</b>. " +
-        (FSA_SUPPORTED
-          ? "Connect a folder under <b>⋯ → Cloud sync</b> and they will be written to disk instead, with no limit. "
-          : "") +
-        "Or export the plan to a JSON file to keep everything.",
-        true
-      );
-    }catch(_){
-      try{ localStorage.removeItem(planKey(state.profileId)); }catch(__){}
-      showBanner("Storage quota exceeded and nothing could be saved to this browser. Export your plan now — closing this tab will lose it.", true);
-    }
+    showBanner("Couldn't save to this browser's storage (" + esc(err.message || String(err)) +
+               "). Your work is still on screen — export the plan to be safe.", true);
   }
-  syncAfterSave();     // runs whether or not localStorage coped
+  /* A tiny mirror in localStorage so a first paint can happen without waiting on
+     IndexedDB, and so an older build still finds something. Never the pixels. */
+  try{ localStorage.setItem(planKey(state.profileId), JSON.stringify(plan)); }catch(_){ }
+
+  if(FS.handle && !FS.denied){
+    try{ folderWrite(JSON.stringify(await serializeFull())); }catch(_){ }
+  }
+  syncAfterSave();
 }
-function load(){
-  let raw;
-  try{ raw = localStorage.getItem(planKey(state.profileId)); }catch(_){ return; }
-  if(!raw) return;
-  try{ adopt(JSON.parse(raw)); }catch(_){ }
-  if(state.imagesDropped){
-    showBanner("Loaded from browser storage, but the photos were dropped earlier because of the storage quota. Re-add them, or import a JSON plan.", true);
+/* Boot: prefer the IndexedDB plan, fall back to whatever localStorage still holds (which
+   is how a plan written by an older build, photos and all, gets carried over exactly once). */
+async function loadAsync(){
+  let plan = null;
+  try{ plan = await planGet(state.profileId); }catch(_){ }
+  /* An empty record must never shadow a plan that still has work in it: that is how a
+     single bad write turns into an empty grid and a plan you cannot see. */
+  const itemCount = p => p && p.items ? Object.keys(p.items).length : 0;
+  let migrating = false;
+  if(itemCount(plan) === 0){
+    let lsRaw = null;
+    try{ lsRaw = localStorage.getItem(planKey(state.profileId)); }catch(_){ }
+    let lsPlan = null;
+    try{ lsPlan = lsRaw ? JSON.parse(lsRaw) : null; }catch(_){ }
+    if(itemCount(lsPlan) > 0){ plan = lsPlan; migrating = true; }
+  }
+  if(!plan){
+    let raw = null;
+    try{ raw = localStorage.getItem(planKey(state.profileId)); }catch(_){ }
+    if(!raw) return;
+    try{ plan = JSON.parse(raw); }catch(_){ return; }
+    migrating = true;
+  }
+  try{ adopt(plan); }catch(_){ return; }
+  await restorePhotos();
+  if(migrating){
+    /* Move the base64 pixels out of localStorage and into the store, once. */
+    await persistPhotos();
+    try{ await planPut(state.profileId, serialize(false)); }catch(_){ }
+    try{ localStorage.setItem(planKey(state.profileId), JSON.stringify(serialize(false))); }catch(_){ }
+  }
+  const lost = Object.values(state.items).filter(i => !i.src && !i.remote).length;
+  if(lost){
+    showBanner("Some photos couldn't be found in this browser's storage. Re-add them, or import a JSON plan.", true);
   }
 }
+function load(){ /* kept for callers that expect the old synchronous name */ }
 function adopt(data){
   if(!data || typeof data!=="object" || !data.items) throw new Error("bad plan");
   const items = {};
@@ -1061,7 +1238,9 @@ function adopt(data){
     items[id] = {
       id,
       name: s.name || "",
-      src: s.src || null,
+      /* Plans are stored without pixels now, so adopting one must never be what erases
+         a photo we are already holding. Only an explicit new src replaces the old. */
+      src: s.src || ((state.items[id] && state.items[id].src) || null),
       remote: s.remote || null,          // CDN url when the pixels couldn't be copied locally
       w: s.w||0, h: s.h||0,
       fx: typeof s.fx==="number" ? s.fx : 50,
@@ -1117,6 +1296,23 @@ function showBanner(html, withExport){
   $("#bannerHide").onclick = hideBanner;
 }
 function hideBanner(){ $("#banner").classList.remove("show"); }
+
+/* A newer copy somewhere else is never an emergency, so it must never block the app.
+   Offer it in the banner and let the work carry on around it. */
+function offerNewer(where, when, onTake, onKeep){
+  FS.hold = true;                       // no folder writes while the answer is pending
+  const release = fn => ()=>{ FS.hold = false; fn && fn(); };
+  const b = $("#banner");
+  b.innerHTML =
+    `A newer copy of this account is in <b>${esc(where)}</b> (${new Date(when).toLocaleString()}). ` +
+    `<button class="btn" id="offerTake">Load it</button> ` +
+    `<button class="btn" id="offerKeep">Keep this device's</button> ` +
+    `<button class="btn" id="bannerHide">Dismiss</button>`;
+  b.classList.add("show");
+  $("#offerTake").onclick = release(()=>{ hideBanner(); onTake(); });
+  $("#offerKeep").onclick = release(()=>{ hideBanner(); onKeep(); });
+  $("#bannerHide").onclick = release(hideBanner);   // ignoring it lets this device carry on
+}
 
 let toastTimer;
 function toast(msg, actionLabel, onAction){
@@ -3720,7 +3916,9 @@ $("#btnClear").onclick = ()=>{
   state.items = {}; state.grid = []; state.tray = [];
   state.selId = null; state.cropId = null;
   try{ localStorage.removeItem(planKey(state.profileId)); }catch(_){}
+  allowEmptySave = true;                 // you asked for empty; that is allowed to stick
   hideBanner(); render(); save();
+  setTimeout(()=>{ allowEmptySave = false; }, 4000);
 };
 
 $("#btnSeed").onclick = ()=>{
@@ -3730,8 +3928,8 @@ $("#btnSeed").onclick = ()=>{
   if(maybeSeed(true)){ save(); toast("Starter feed reloaded"); }
 };
 
-function exportPlan(){
-  const blob = new Blob([JSON.stringify(serialize(true, true), null, 1)], {type:"application/json"});
+async function exportPlan(){
+  const blob = new Blob([JSON.stringify(await serializeFull(true), null, 1)], {type:"application/json"});
   const a = document.createElement("a");
   const d = new Date(), p = n => String(n).padStart(2,"0");
   a.href = URL.createObjectURL(blob);
@@ -3767,6 +3965,8 @@ $("#jsonPicker").addEventListener("change", e=>{
 document.addEventListener("keydown", e=>{
   const typing = /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName);
   if(e.key === "Escape"){
+    if($("#menu").classList.contains("show")){ closeMenu(); return; }
+    if($("#tplModal").classList.contains("show")){ $("#tplModal").classList.remove("show"); return; }
     if(ctxId){ closeCtx(); return; }
     if($("#addModal").classList.contains("show")){ closeAdd(); return; }
     if($("#sliceModal").classList.contains("show")){ closeSlicer(); return; }
@@ -3814,8 +4014,8 @@ function switchProfile(id){
   state.profileId = id;
   saveProfiles();
   resetPlanState();
-  load();
-  maybeSeed();
+  bootReady = false;                       // same rule when swapping accounts
+  loadAsync().then(()=>{ bootReady = true; maybeSeed(); render(); prevSnap = takeSnap(); updateSaveUI(); renderProfiles(); });
   render();
   prevSnap = takeSnap();
   updateSaveUI(); renderProfiles();
@@ -3854,8 +4054,9 @@ function deleteProfile(){
   state.profileId = profiles[0].id;
   saveProfiles();
   resetPlanState();
-  load(); render();
-  prevSnap = takeSnap(); updateSaveUI(); renderProfiles();
+  bootReady = false;
+  loadAsync().then(()=>{ bootReady = true; render(); prevSnap = takeSnap(); updateSaveUI(); renderProfiles(); });
+  render();
   toast(`Deleted @${p.handle}`);
 }
 
@@ -3957,7 +4158,18 @@ function maybeSeed(force){
    which is the whole reason this exists: photos are embedded in the plan, and localStorage
    simply cannot hold a real feed plus option stacks. */
 const FSA_SUPPORTED = typeof window.showDirectoryPicker === "function";
-const FS = { handle:null, name:"", lastWrite:0, status:"", denied:false };
+const FS = { handle:null, name:"", lastWrite:0, status:"", denied:false, seen:{}, hold:false };
+/* seen[profileId] = the savedAt of the file as this device last left it — written by us
+   or loaded from someone else. A file still carrying that stamp needs no reconciling.
+   Kept in localStorage too (a few bytes, so it survives a quota failure that the plan
+   itself could not) and mirrored in memory in case even that write fails. */
+const SEEN_KEY = "ig-grid-planner-fs-seen";
+try{ FS.seen = JSON.parse(localStorage.getItem(SEEN_KEY) || "{}") || {}; }catch(_){ FS.seen = {}; }
+function markSeen(id, stamp){
+  if(!id || !stamp) return;
+  FS.seen[id] = stamp;
+  try{ localStorage.setItem(SEEN_KEY, JSON.stringify(FS.seen)); }catch(_){ }
+}
 
 /* one tiny IndexedDB store, purely to persist the directory handle across reloads */
 function idb(){
@@ -4007,12 +4219,40 @@ async function connectFolder(){
       FS.status = "Permission refused."; renderSyncUI(); return false;
     }
     FS.handle = handle; FS.name = handle.name; FS.denied = false; FS.status = "";
-    await idbSet("folder", handle);
-    await folderWrite(JSON.stringify(serialize(true)), true);
+    /* Remembering the handle is a convenience: if it fails you reconnect next session,
+       which is no reason to abandon a folder that is otherwise working. */
+    try{ await idbSet("folder", handle); }catch(_){ }
+
+    /* Look before writing. The folder may already hold a plan from another machine,
+       and connecting must never be the thing that destroys it. */
+    let offering = false;
+    const existing = await folderRead(planFile());
+    const mineEmpty = !state.grid.length && !state.tray.length;
+    const theirsAt  = existing ? (Date.parse(existing.savedAt || 0) || 0) : 0;
+    const mineAt    = Date.parse(lastSavedPlanStamp() || 0) || 0;
+
+    if(existing && mineEmpty){
+      adopt(existing); render(); prevSnap = takeSnap();
+      markSeen(state.profileId, existing.savedAt);
+      try{ localStorage.setItem(planKey(state.profileId), JSON.stringify(serialize(false))); }catch(_){ }
+      renderProfiles();
+      toast("Opened the plan already in " + handle.name);
+    }else if(existing && theirsAt > mineAt + 1000){
+      offering = true;
+      markSeen(state.profileId, existing.savedAt);
+      offerNewer(handle.name, theirsAt,
+        ()=>{ adopt(existing); render(); prevSnap = takeSnap(); save();
+              toast("Loaded the copy from " + handle.name); },
+        async ()=>{ folderWrite(JSON.stringify(await serializeFull()), true);
+              toast("Kept this device's version"); });
+    }else{
+      await folderWrite(JSON.stringify(await serializeFull()), true);
+    }
     // localStorage no longer needs the pixels
     try{ localStorage.setItem(planKey(state.profileId), JSON.stringify(serialize(false))); }catch(_){ }
-    hideBanner(); renderSyncUI();
-    toast("Saving to " + handle.name + " from now on");
+    if(!offering) hideBanner();          // never wipe the choice we just put up
+    renderSyncUI();
+    if(!offering) toast("Saving to " + handle.name + " from now on");
     return true;
   }catch(e){
     if(e && e.name === "AbortError") return false;      // they closed the picker
@@ -4024,7 +4264,7 @@ async function connectFolder(){
 async function disconnectFolder(){
   FS.handle = null; FS.name = ""; FS.status = "";
   try{ await idbSet("folder", null); }catch(_){ }
-  try{ localStorage.setItem(planKey(state.profileId), JSON.stringify(serialize(true))); }catch(_){ }
+  try{ localStorage.setItem(planKey(state.profileId), JSON.stringify(serialize(false))); }catch(_){ }
   renderSyncUI();
   toast("Folder disconnected — back to browser storage");
 }
@@ -4047,7 +4287,9 @@ async function folderRestore(){
 
 let fsTimer = null;
 function folderWrite(text, now){
-  if(!FS.handle || FS.denied) return;
+  /* A choice about this file is on screen: writing now would destroy the very copy
+     being offered, before it can be taken. */
+  if(!FS.handle || FS.denied || FS.hold) return;
   clearTimeout(fsTimer);
   const doWrite = async ()=>{
     try{
@@ -4057,6 +4299,7 @@ function folderWrite(text, now){
       const fh = await FS.handle.getFileHandle(planFile(), {create:true});
       const w  = await fh.createWritable();
       await w.write(text); await w.close();
+      try{ markSeen(state.profileId, JSON.parse(text).savedAt); }catch(_){ }
       const mh = await FS.handle.getFileHandle("profiles.json", {create:true});
       const mw = await mh.createWritable();
       await mw.write(JSON.stringify({profiles, savedAt:new Date().toISOString()}, null, 1));
@@ -4096,20 +4339,37 @@ async function folderCheck(opts){
     }
     const remote = await folderRead(planFile());
     if(!remote){ if(!silent) toast("Nothing saved in that folder for this account yet"); return false; }
-    const localAt  = Date.parse(lastSavedPlanStamp() || 0) || 0;
+    /* Only a stamp we have never reconciled means another device wrote the file. */
+    if(remote.savedAt && FS.seen[state.profileId] === remote.savedAt){
+      if(!silent) toast("Folder copy matches this device");
+      return false;
+    }
+    const localAt  = Math.max(Date.parse(lastSavedPlanStamp() || 0) || 0,
+                              Date.parse(FS.seen[state.profileId] || 0) || 0);
     const remoteAt = Date.parse(remote.savedAt || 0) || 0;
-    if(remoteAt <= localAt + 1000){ if(!silent) toast("Folder copy matches this device"); return false; }
-    const takeIt = confirm(
-      "The copy in " + FS.name + " is newer (" + new Date(remoteAt).toLocaleString() + ").\n\n" +
-      "OK — load it and replace what is on this device.\n" +
-      "Cancel — keep this device\'s version and overwrite the file.");
-    if(!takeIt){ folderWrite(JSON.stringify(serialize(true)), true); return false; }
-    adopt(remote);
-    render(); prevSnap = takeSnap();
-    try{ localStorage.setItem(planKey(state.profileId), JSON.stringify(serialize(false))); }catch(_){ }
-    renderProfiles(); renderSyncUI();
-    toast("Loaded the newer copy from " + FS.name);
-    return true;
+    if(remoteAt <= localAt + 1000){
+      markSeen(state.profileId, remote.savedAt);
+      if(!silent) toast("Folder copy matches this device");
+      return false;
+    }
+    /* Reconciled either way — never raise the same stamp twice. */
+    markSeen(state.profileId, remote.savedAt);
+
+    const take = ()=>{
+      adopt(remote);
+      render(); prevSnap = takeSnap();
+      try{ localStorage.setItem(planKey(state.profileId), JSON.stringify(serialize(false))); }catch(_){ }
+      renderProfiles(); renderSyncUI();
+      toast("Loaded the newer copy from " + FS.name);
+    };
+    /* Nothing on this device to lose: just open it, which is what someone arriving
+       at a second machine actually wants. */
+    if(!state.grid.length && !state.tray.length){ take(); return true; }
+
+    offerNewer(FS.name, remoteAt, take,
+               async ()=>{ folderWrite(JSON.stringify(await serializeFull()), true);
+                     toast("Kept this device's version"); });
+    return false;
   }finally{ folderChecking = false; }
 }
 window.addEventListener("focus", ()=>folderCheck({silent:true}));
@@ -4118,7 +4378,7 @@ window.addEventListener("focus", ()=>folderCheck({silent:true}));
 /* One JSON file per account in Supabase Storage at <uid>/<profileId>.json, plus a
    <uid>/profiles.json manifest so a new device learns which accounts exist. localStorage
    stays the source of truth; this is a mirror. Signed out, none of it runs. */
-const SYNC = { client:null, user:null, busy:false, lastPull:0, lastPush:0, status:"" };
+const SYNC = { client:null, user:null, busy:false, lastPull:0, lastPush:0, status:"", offered:"" };
 
 function syncConfig(){
   try{
@@ -4186,7 +4446,7 @@ async function syncPush(){
     const put = (path, obj) => sb.storage.from("plans").upload(
       path, new Blob([JSON.stringify(obj)], {type:"application/json"}),
       {upsert:true, contentType:"application/json"});
-    let r = await put(planPath(state.profileId), serialize(true));
+    let r = await put(planPath(state.profileId), await serializeFull());
     if(r.error) throw new Error(r.error.message);
     r = await put(manifestPath(), {profiles, savedAt:new Date().toISOString()});
     if(r.error) throw new Error(r.error.message);
@@ -4228,21 +4488,27 @@ async function syncPull(opts){
     const remoteAt = Date.parse(remote.savedAt || 0) || 0;
     if(remoteAt <= localAt){ if(!silent) toast("Already up to date"); return false; }
 
-    if((state.grid.length || state.tray.length) && localAt && !silent){
-      const takeIt = confirm(
-        "The cloud copy of @" + activeProfile().handle + " is newer (" +
-        new Date(remoteAt).toLocaleString() + ").\n\n" +
-        "OK — replace this device\'s version with it.\n" +
-        "Cancel — keep this device\'s version and push it up instead.");
-      if(!takeIt){ SYNC.busy = false; return await syncPush(); }
+    const applyRemote = ()=>{
+      adopt(remote);
+      render();
+      prevSnap = takeSnap();
+      clearTimeout(saveTimer); saveNow();
+      SYNC.lastPull = Date.now();
+      renderSyncUI();
+      toast("Pulled the cloud copy of this account");
+    };
+
+    /* Same rule as the folder: work on this device is never replaced behind your back,
+       but an empty device just opens the plan. */
+    if((state.grid.length || state.tray.length) && localAt && silent){
+      if(SYNC.offered === remote.savedAt) return false;   // asked once already
+      SYNC.offered = remote.savedAt;
+      SYNC.busy = false;
+      offerNewer("the cloud", remoteAt, applyRemote,
+                 ()=>{ syncPush().then(ok=>toast(ok ? "Kept this device's version" : "Upload failed")); });
+      return false;
     }
-    adopt(remote);
-    render();
-    prevSnap = takeSnap();
-    clearTimeout(saveTimer); saveNow();
-    SYNC.lastPull = Date.now();
-    renderSyncUI();
-    toast("Pulled the cloud copy of this account");
+    applyRemote();
     return true;
   }catch(e){
     SYNC.status = e.message || String(e);
@@ -4260,10 +4526,26 @@ function syncAfterSave(){
 }
 
 /* ---- sync UI ---- */
+
+/* Phones and Safari have no folder API, so the Dropbox copy is desktop-only. Rather than
+   open the sheet with an option that can't be taken, explain it once at the foot. */
+function folderFootnoteHTML(){
+  if(FSA_SUPPORTED) return "";
+  return `<p class="hint">Saving straight into a Dropbox folder needs Chrome or Edge on a
+    computer, so it isn't available here. Signing in above is the way this device stays
+    in step — your desktop uploads, this one downloads.</p>`;
+}
+
+/* The one state where a device is quietly alone: writing to Dropbox, but nothing in the
+   cloud, so the phone has no way to reach any of it. */
+function bridgeNoticeHTML(){
+  if(!FS.handle || SYNC.user || !syncConfigured()) return "";
+  return `<p class="hint warn">Your plan is going to <b>${esc(FS.name)}</b>, but your phone
+    can't read a Dropbox folder. Sign in below and it gets a copy too.</p>`;
+}
 function folderBlockHTML(){
   if(!FSA_SUPPORTED){
-    return `<div class="opt"><h3>Save to a folder</h3>
-      <p class="muted">Needs Chrome or Edge — this browser can't open folders.</p></div>`;
+    return "";   // handled as a footnote by folderFootnoteHTML(); see renderSyncUI
   }
   const stamp = t => t ? new Date(t).toLocaleTimeString() : "—";
   if(!FS.handle){
@@ -4317,15 +4599,16 @@ function renderSyncUI(){
     return;
   }
   if(!SYNC.user){
-    body.innerHTML = folderBlockHTML() +
-      `<hr><p class="hint">Sign in and this account's plan — photos included — follows you to
+    body.innerHTML = folderBlockHTML() + bridgeNoticeHTML() +
+      `${FSA_SUPPORTED ? "<hr>" : ""}<p class="hint">Sign in and this account's plan — photos included — follows you to
         your phone and back. You get a one-time link by email; there is no password.</p>
        <div class="field">
          <label>Email</label>
          <input type="email" id="syncEmail" placeholder="you@example.com" autocomplete="email">
        </div>
        <div class="row-btns"><button class="btn primary" id="syncSend">Email me a sign-in link</button></div>
-       <div class="sync-status" id="syncMsg">${esc(SYNC.status || "")}</div>`;
+       <div class="sync-status" id="syncMsg">${esc(SYNC.status || "")}</div>` +
+      folderFootnoteHTML();
     wireFolderBlock();
     $("#syncSend").onclick = async ()=>{
       const email = ($("#syncEmail").value || "").trim();
@@ -4338,7 +4621,7 @@ function renderSyncUI(){
     };
     return;
   }
-  body.innerHTML = folderBlockHTML() + `<hr>` +
+  body.innerHTML = folderBlockHTML() + (FSA_SUPPORTED ? `<hr>` : "") +
     `<p class="connected">✓ Signed in as <b>${esc(SYNC.user.email || "")}</b></p>
      <div class="kv"><span>account</span><b>@${esc(activeProfile().handle)}</b></div>
      <div class="kv"><span>last upload</span><b>${stamp(SYNC.lastPush)}</b></div>
@@ -4350,7 +4633,8 @@ function renderSyncUI(){
        <button class="btn" id="syncDown">Download from cloud</button>
      </div>
      <div class="row-btns"><button class="btn danger" id="syncOut">Sign out</button></div>
-     <div class="sync-status ${SYNC.status ? "err" : ""}" id="syncMsg">${esc(SYNC.status || "")}</div>`;
+     <div class="sync-status ${SYNC.status ? "err" : ""}" id="syncMsg">${esc(SYNC.status || "")}</div>` +
+    folderFootnoteHTML();
   wireFolderBlock();
   $("#syncUp").onclick   = async ()=>{ $("#syncMsg").textContent = "Uploading…";
                                        $("#syncMsg").textContent = await syncPush() ? "Uploaded." : (SYNC.status || "Upload failed."); };
@@ -4374,9 +4658,16 @@ $("#cloudModal").addEventListener("click", e=>{ if(e.target.id === "cloudModal")
 
 /* ============================ boot ============================ */
 loadProfiles();
-load();
+askPersistence();
 render();
-if(!maybeSeed()) render();
+loadAsync().then(()=>{
+  bootReady = true;
+  render();
+  if(!maybeSeed()) render();
+  prevSnap = takeSnap();
+  updateSaveUI();
+  gcPhotos();
+}).catch(()=>{ bootReady = true; if(!maybeSeed()) render(); });
 try{ if(localStorage.getItem(planKey(state.profileId))) lastSavedAt = Date.now(); }catch(_){ }
 prevSnap = takeSnap();
 renderProfiles();
