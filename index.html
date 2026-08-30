@@ -877,7 +877,8 @@ function loadProfiles(){
   state.profileId = profiles.some(p => p.id === active) ? active : profiles[0].id;
   saveProfiles();
 }
-const MAX_DIM = 1000;          // longest edge stored, keeps localStorage sane
+const MAX_DIM = 800;           // longest edge stored; a third smaller than 1000 with no
+                               // visible loss at the sizes these are ever rendered at
 const JPEG_Q  = 0.82;
 const AR      = 3/4;           // Instagram feed thumbnail ratio (w:h)
 
@@ -953,12 +954,17 @@ function save(){
 }
 function saveNow(){
   clearTimeout(saveTimer);
+  const full = JSON.stringify(serialize(true));
+  /* A connected folder has no quota, so it is the durable copy. Fire it first and always,
+     whatever localStorage then does. */
+  folderWrite(full);
   try{
-    localStorage.setItem(planKey(state.profileId), JSON.stringify(serialize(true)));
-    if(state.imagesDropped){ state.imagesDropped = false; }
+    // with a folder connected, localStorage is only a fast index — the pixels live on disk
+    localStorage.setItem(planKey(state.profileId),
+                         FS.handle ? JSON.stringify(serialize(false)) : full);
+    if(state.imagesDropped && !FS.handle){ state.imagesDropped = false; }
     lastSavedAt = Date.now(); saveDirty = false; saveFailed = false;
     updateSaveUI();
-    syncAfterSave();
     hideBanner();
   }catch(err){
     saveFailed = true; saveDirty = false; updateSaveUI();
@@ -968,7 +974,10 @@ function saveNow(){
       state.imagesDropped = true;
       showBanner(
         "Storage quota exceeded — your layout, crops and notes are saved, but the <b>photos are not</b>. " +
-        "Export the plan to a JSON file to keep everything.",
+        (FSA_SUPPORTED
+          ? "Connect a folder under <b>⋯ → Cloud sync</b> and they will be written to disk instead, with no limit. "
+          : "") +
+        "Or export the plan to a JSON file to keep everything.",
         true
       );
     }catch(_){
@@ -976,6 +985,7 @@ function saveNow(){
       showBanner("Storage quota exceeded and nothing could be saved to this browser. Export your plan now — closing this tab will lose it.", true);
     }
   }
+  syncAfterSave();     // runs whether or not localStorage coped
 }
 function load(){
   let raw;
@@ -3719,6 +3729,169 @@ function maybeSeed(force){
   return true;
 }
 
+/* ============================ folder store ============================ */
+/* Point the app at a folder inside Dropbox and it writes the plan there on every save.
+   Dropbox then handles syncing it between machines. A file on disk has no 5MB ceiling,
+   which is the whole reason this exists: photos are embedded in the plan, and localStorage
+   simply cannot hold a real feed plus option stacks. */
+const FSA_SUPPORTED = typeof window.showDirectoryPicker === "function";
+const FS = { handle:null, name:"", lastWrite:0, status:"", denied:false };
+
+/* one tiny IndexedDB store, purely to persist the directory handle across reloads */
+function idb(){
+  return new Promise((res, rej) => {
+    const r = indexedDB.open("gridplanner-fs", 1);
+    r.onupgradeneeded = () => r.result.createObjectStore("kv");
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+}
+async function idbSet(k, v){
+  const db = await idb();
+  return new Promise((res, rej) => {
+    const tx = db.transaction("kv", "readwrite");
+    tx.objectStore("kv").put(v, k);
+    tx.oncomplete = res; tx.onerror = () => rej(tx.error);
+  });
+}
+async function idbGet(k){
+  const db = await idb();
+  return new Promise((res) => {
+    const tx = db.transaction("kv", "readonly");
+    const q = tx.objectStore("kv").get(k);
+    q.onsuccess = () => res(q.result);
+    q.onerror = () => res(null);
+  });
+}
+
+const planFile = () => state.profileId + ".json";
+
+async function folderPermission(handle, request){
+  if(!handle) return "denied";
+  const opts = {mode:"readwrite"};
+  let p = await handle.queryPermission(opts);
+  if(p !== "granted" && request) p = await handle.requestPermission(opts);
+  return p;
+}
+
+async function connectFolder(){
+  if(!FSA_SUPPORTED){
+    toast("This browser can't open folders — Chrome or Edge only");
+    return false;
+  }
+  try{
+    const handle = await window.showDirectoryPicker({id:"gridplanner", mode:"readwrite"});
+    if(await folderPermission(handle, true) !== "granted"){
+      FS.status = "Permission refused."; renderSyncUI(); return false;
+    }
+    FS.handle = handle; FS.name = handle.name; FS.denied = false; FS.status = "";
+    await idbSet("folder", handle);
+    await folderWrite(JSON.stringify(serialize(true)), true);
+    // localStorage no longer needs the pixels
+    try{ localStorage.setItem(planKey(state.profileId), JSON.stringify(serialize(false))); }catch(_){ }
+    hideBanner(); renderSyncUI();
+    toast("Saving to " + handle.name + " from now on");
+    return true;
+  }catch(e){
+    if(e && e.name === "AbortError") return false;      // they closed the picker
+    FS.status = e.message || String(e); renderSyncUI();
+    return false;
+  }
+}
+
+async function disconnectFolder(){
+  FS.handle = null; FS.name = ""; FS.status = "";
+  try{ await idbSet("folder", null); }catch(_){ }
+  try{ localStorage.setItem(planKey(state.profileId), JSON.stringify(serialize(true))); }catch(_){ }
+  renderSyncUI();
+  toast("Folder disconnected — back to browser storage");
+}
+
+/* restore the handle on boot; permission may need a gesture, so surface that rather
+   than failing quietly */
+async function folderRestore(){
+  if(!FSA_SUPPORTED) return;
+  let handle;
+  try{ handle = await idbGet("folder"); }catch(_){ return; }
+  if(!handle) return;
+  FS.handle = handle; FS.name = handle.name;
+  const p = await folderPermission(handle, false);
+  if(p !== "granted"){
+    FS.denied = true;
+    FS.status = "Reconnect to keep saving to " + handle.name + ".";
+  }
+  renderSyncUI();
+}
+
+let fsTimer = null;
+function folderWrite(text, now){
+  if(!FS.handle || FS.denied) return;
+  clearTimeout(fsTimer);
+  const doWrite = async ()=>{
+    try{
+      if(await folderPermission(FS.handle, false) !== "granted"){
+        FS.denied = true; FS.status = "Folder permission lapsed — reconnect."; renderSyncUI(); return;
+      }
+      const fh = await FS.handle.getFileHandle(planFile(), {create:true});
+      const w  = await fh.createWritable();
+      await w.write(text); await w.close();
+      const mh = await FS.handle.getFileHandle("profiles.json", {create:true});
+      const mw = await mh.createWritable();
+      await mw.write(JSON.stringify({profiles, savedAt:new Date().toISOString()}, null, 1));
+      await mw.close();
+      FS.lastWrite = Date.now(); FS.status = "";
+      renderSyncUI();
+    }catch(e){
+      FS.status = e.message || String(e); renderSyncUI();
+    }
+  };
+  if(now) return doWrite();
+  fsTimer = setTimeout(doWrite, 600);
+}
+
+async function folderRead(name){
+  if(!FS.handle || FS.denied) return null;
+  try{
+    const fh = await FS.handle.getFileHandle(name);
+    return JSON.parse(await (await fh.getFile()).text());
+  }catch(_){ return null; }     // missing is normal
+}
+
+/* Another machine may have written the file and Dropbox synced it down. Check on boot
+   and whenever the window regains focus. */
+let folderChecking = false;
+async function folderCheck(opts){
+  const silent = opts && opts.silent;
+  if(!FS.handle || FS.denied || folderChecking) return false;
+  folderChecking = true;
+  try{
+    const man = await folderRead("profiles.json");
+    if(man && Array.isArray(man.profiles)){
+      const known = new Set(profiles.map(p=>p.id));
+      let added = 0;
+      for(const p of man.profiles) if(p && p.id && !known.has(p.id)){ profiles.push(p); added++; }
+      if(added){ saveProfiles(); renderProfiles(); }
+    }
+    const remote = await folderRead(planFile());
+    if(!remote){ if(!silent) toast("Nothing saved in that folder for this account yet"); return false; }
+    const localAt  = Date.parse(lastSavedPlanStamp() || 0) || 0;
+    const remoteAt = Date.parse(remote.savedAt || 0) || 0;
+    if(remoteAt <= localAt + 1000){ if(!silent) toast("Folder copy matches this device"); return false; }
+    const takeIt = confirm(
+      "The copy in " + FS.name + " is newer (" + new Date(remoteAt).toLocaleString() + ").\n\n" +
+      "OK — load it and replace what is on this device.\n" +
+      "Cancel — keep this device\'s version and overwrite the file.");
+    if(!takeIt){ folderWrite(JSON.stringify(serialize(true)), true); return false; }
+    adopt(remote);
+    render(); prevSnap = takeSnap();
+    try{ localStorage.setItem(planKey(state.profileId), JSON.stringify(serialize(false))); }catch(_){ }
+    renderProfiles(); renderSyncUI();
+    toast("Loaded the newer copy from " + FS.name);
+    return true;
+  }finally{ folderChecking = false; }
+}
+window.addEventListener("focus", ()=>folderCheck({silent:true}));
+
 /* ============================ cloud sync ============================ */
 /* One JSON file per account in Supabase Storage at <uid>/<profileId>.json, plus a
    <uid>/profiles.json manifest so a new device learns which accounts exist. localStorage
@@ -3865,22 +4038,65 @@ function syncAfterSave(){
 }
 
 /* ---- sync UI ---- */
+function folderBlockHTML(){
+  if(!FSA_SUPPORTED){
+    return `<div class="opt"><h3>Save to a folder</h3>
+      <p class="muted">Needs Chrome or Edge — this browser can't open folders.</p></div>`;
+  }
+  const stamp = t => t ? new Date(t).toLocaleTimeString() : "—";
+  if(!FS.handle){
+    return `<div class="opt"><h3>Save to a folder <em>recommended</em></h3>
+      <p>Point this at a folder inside Dropbox and the whole plan — photos included — is
+        written there on every change. <b>No size limit</b>, and Dropbox carries it to your
+        other computers.</p>
+      <p class="muted">Browser storage caps out around 5 MB, which is only a few sets of
+        options. This is the fix for that.</p>
+      <div class="row-btns"><button class="btn primary" id="fsConnect">Choose a folder…</button></div>
+      <div class="sync-status ${FS.status?"err":""}">${esc(FS.status||"")}</div></div>`;
+  }
+  if(FS.denied){
+    return `<div class="opt"><h3>Save to a folder</h3>
+      <p class="muted">Connected to <b>${esc(FS.name)}</b>, but this browser needs you to
+        confirm access again before it can write.</p>
+      <div class="row-btns"><button class="btn primary" id="fsConnect">Reconnect ${esc(FS.name)}</button></div>
+      <div class="sync-status err">${esc(FS.status||"")}</div></div>`;
+  }
+  return `<div class="opt"><h3>Save to a folder</h3>
+    <p class="connected">✓ Writing to <b>${esc(FS.name)}</b></p>
+    <div class="kv"><span>file</span><b>${esc(planFile())}</b></div>
+    <div class="kv"><span>last written</span><b>${stamp(FS.lastWrite)}</b></div>
+    <div class="row-btns">
+      <button class="btn" id="fsCheck">Load newer copy</button>
+      <button class="btn" id="fsPick">Change folder…</button>
+      <button class="btn danger" id="fsOff">Disconnect</button>
+    </div>
+    <div class="sync-status ${FS.status?"err":""}">${esc(FS.status||"")}</div></div>`;
+}
+
+function wireFolderBlock(){
+  const c = $("#fsConnect") || $("#fsPick");
+  if(c) c.onclick = connectFolder;
+  const chk = $("#fsCheck"); if(chk) chk.onclick = ()=>folderCheck({});
+  const off = $("#fsOff");   if(off) off.onclick = disconnectFolder;
+}
+
 function renderSyncUI(){
   const body = $("#syncBody");
   if(!body) return;
   const stamp = t => t ? new Date(t).toLocaleTimeString() : "—";
   if(!syncConfigured()){
-    body.innerHTML =
+    body.innerHTML = folderBlockHTML() +
       `<p class="hint">This build has no Supabase project attached, so the app is running
         entirely offline — which is a perfectly good way to use it.</p>
        <p class="hint">To turn sync on: create a free Supabase project, run
         <b>supabase-setup.sql</b> in its SQL editor, then put the project URL and the
         public (anon) key into the <b>syncConfig</b> block at the bottom of index.html.</p>`;
+    wireFolderBlock();
     return;
   }
   if(!SYNC.user){
-    body.innerHTML =
-      `<p class="hint">Sign in and this account's plan — photos included — follows you to
+    body.innerHTML = folderBlockHTML() +
+      `<hr><p class="hint">Sign in and this account's plan — photos included — follows you to
         your phone and back. You get a one-time link by email; there is no password.</p>
        <div class="field">
          <label>Email</label>
@@ -3888,6 +4104,7 @@ function renderSyncUI(){
        </div>
        <div class="row-btns"><button class="btn primary" id="syncSend">Email me a sign-in link</button></div>
        <div class="sync-status" id="syncMsg">${esc(SYNC.status || "")}</div>`;
+    wireFolderBlock();
     $("#syncSend").onclick = async ()=>{
       const email = ($("#syncEmail").value || "").trim();
       if(!email){ $("#syncMsg").textContent = "Enter your email first."; return; }
@@ -3899,7 +4116,7 @@ function renderSyncUI(){
     };
     return;
   }
-  body.innerHTML =
+  body.innerHTML = folderBlockHTML() + `<hr>` +
     `<p class="connected">✓ Signed in as <b>${esc(SYNC.user.email || "")}</b></p>
      <div class="kv"><span>account</span><b>@${esc(activeProfile().handle)}</b></div>
      <div class="kv"><span>last upload</span><b>${stamp(SYNC.lastPush)}</b></div>
@@ -3912,6 +4129,7 @@ function renderSyncUI(){
      </div>
      <div class="row-btns"><button class="btn danger" id="syncOut">Sign out</button></div>
      <div class="sync-status ${SYNC.status ? "err" : ""}" id="syncMsg">${esc(SYNC.status || "")}</div>`;
+  wireFolderBlock();
   $("#syncUp").onclick   = async ()=>{ $("#syncMsg").textContent = "Uploading…";
                                        $("#syncMsg").textContent = await syncPush() ? "Uploaded." : (SYNC.status || "Upload failed."); };
   $("#syncDown").onclick = async ()=>{ $("#syncMsg").textContent = "Checking…"; await syncPull({}); };
@@ -3937,6 +4155,11 @@ applyScale();
 updateSaveUI();
 
 /* returning from a magic link, or a session already stored: pull quietly */
+(async ()=>{
+  await folderRestore();
+  await folderCheck({silent:true});
+})();
+
 (async ()=>{
   if(!syncConfigured()) return;
   const user = await syncSession();
