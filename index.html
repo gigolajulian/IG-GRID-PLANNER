@@ -1065,8 +1065,13 @@ async function gcPhotos(){
   try{
     const plans = await planGetAll();
     const live = new Set();
-    for(const p of plans || []) for(const id in (p && p.items) || {}) live.add(id);
-    for(const id in state.items) live.add(id);
+    const noteAll = it => {
+      if(!it) return;
+      if(it.pid) live.add(it.pid);
+      for(const a of it.alts || []) if(a && a.pid) live.add(a.pid);
+    };
+    for(const p of plans || []) for(const id in (p && p.items) || {}){ live.add(id); noteAll(p.items[id]); }
+    for(const id in state.items){ live.add(id); noteAll(state.items[id]); }
     const keys = await photoKeys();
     let freed = 0;
     for(const k of keys || []) if(!live.has(k)){ await photoDel(k); freed++; }
@@ -1112,32 +1117,58 @@ function forgetPhoto(id){
 
 /* Write any photo the store doesn't have yet. Blobs are content we already hold, so this
    is a copy, never a re-encode. */
+/* Every photo -- the one in the slot and every option behind it -- needs its own identity
+   in the store. Options used to carry whatever string was in it.src, which was fine when
+   that was base64 but is now an object URL: ephemeral, and revoked the moment the slot's
+   live photo is rewritten. That is why switching options broke the thumbnails. */
+function photoIdFor(p){
+  if(!p.pid) p.pid = "p_" + uid();
+  return p.pid;
+}
+async function blobFromSrc(src){
+  if(!src) return null;
+  return (await fetch(src)).blob();     // works for both data: and blob: urls
+}
+/* Walk the live photo and the options of one item, storing anything not yet stored. */
+async function persistItemPhotos(it, have){
+  const each = [it, ...(it.alts || [])];
+  for(const p of each){
+    if(!p.src) continue;
+    const pid = photoIdFor(p);
+    if(have.has(pid) && photoSrcSeen.get(pid) === p.src) continue;
+    try{
+      const blob = await blobFromSrc(p.src);
+      if(!blob) continue;
+      await photoPut(pid, blob);
+      have.add(pid);
+      p.src = urlForBlob(pid, blob);
+      photoSrcSeen.set(pid, p.src);
+    }catch(_){ }
+  }
+}
+
 const photoSrcSeen = new Map();   // id -> the src we last wrote, so a replaced photo is noticed
 async function persistPhotos(){
   const have = new Set(await photoKeys().catch(()=>[]));
   for(const id in state.items){
     const it = state.items[id];
-    if(!it.src) continue;
-    if(have.has(id) && photoSrcSeen.get(id) === it.src) continue;
-    try{
-      const blob = it.src.startsWith("blob:") ? await (await fetch(it.src)).blob()
-                                              : await dataUrlToBlob(it.src);
-      await photoPut(id, blob);
-      if(!it.src.startsWith("blob:")) it.src = urlForBlob(id, blob);   // drop the base64 copy
-      photoSrcSeen.set(id, it.src);
-    }catch(_){ }                                                        // a failed photo is not a failed save
+    if(!it.pid) it.pid = id;            // the live photo keeps the item's id, as before
+    await persistItemPhotos(it, have);
   }
 }
 
-/* Rehydrate after a load: every item that has a stored photo gets a usable src back. */
+/* Rehydrate after a load: the slot photo and every option get a usable src back. */
 async function restorePhotos(){
   for(const id in state.items){
     const it = state.items[id];
-    if(it.src) continue;
-    try{
-      const blob = await photoGet(id);
-      if(blob){ it.src = urlForBlob(id, blob); photoSrcSeen.set(id, it.src); }
-    }catch(_){ }
+    if(!it.pid) it.pid = id;
+    for(const p of [it, ...(it.alts || [])]){
+      if(p.src || !p.pid) continue;
+      try{
+        const blob = await photoGet(p.pid);
+        if(blob){ p.src = urlForBlob(p.pid, blob); photoSrcSeen.set(p.pid, p.src); }
+      }catch(_){ }
+    }
   }
 }
 
@@ -1146,14 +1177,21 @@ async function restorePhotos(){
 async function serializeFull(forExport){
   const out = serialize(false, forExport);
   out.imagesDropped = false;
+  const inline = async src => {
+    if(!src) return null;
+    try{ return await blobToDataUrl(await blobFromSrc(src)); }catch(_){ return null; }
+  };
   for(const id in out.items){
     const it = state.items[id];
-    if(!it || !it.src) continue;
-    try{
-      const blob = it.src.startsWith("blob:") ? await (await fetch(it.src)).blob()
-                                              : await dataUrlToBlob(it.src);
-      out.items[id].src = await blobToDataUrl(blob);
-    }catch(_){ }
+    if(!it) continue;
+    out.items[id].src = await inline(it.src);
+    /* Options travel too. They were being dropped from every export, every folder file
+       and every cloud upload, so a synced device arrived with one frame per slot. */
+    const alts = it.alts || [];
+    out.items[id].alts = [];
+    for(const a of alts){
+      out.items[id].alts.push({...a, src: await inline(a.src)});
+    }
   }
   return out;
 }
@@ -1163,7 +1201,10 @@ function serialize(withImages, forExport){
   const items = {};
   for(const id in state.items){
     const it = state.items[id];
-    items[id] = {...it, src: withImages ? it.src : null};
+    /* Options are addressed by pid like the slot photo, so their src must be dropped
+       too -- a stale blob: url stored here would look valid on load and never be restored. */
+    items[id] = {...it, src: withImages ? it.src : null,
+                 alts: (it.alts || []).map(a => ({...a, src: withImages ? a.src : null}))};
   }
   return {
     v:1, savedAt:new Date().toISOString(),
@@ -1301,7 +1342,11 @@ function adopt(data){
       fy: typeof s.fy==="number" ? s.fy : 50,
       posted: !!s.posted,
       pinned: !!s.pinned,
-      alts: Array.isArray(s.alts) ? s.alts : [],
+      pid: s.pid || id,
+      alts: (Array.isArray(s.alts) ? s.alts : []).map((a, n) => {
+        const held = ((state.items[id] && state.items[id].alts) || [])[n];
+        return {...a, src: a.src || (held && held.src) || null};
+      }),
       note: s.note || "",
       hash: typeof s.hash === "string" ? s.hash : null,
       title: s.title || "",
@@ -2342,11 +2387,11 @@ function removeTile(id){
    about this; the losers sit in it.alts and swap places with the live one on demand. */
 const MAX_OPTIONS = 8;
 function packPhoto(it){
-  return {name:it.name, src:it.src, remote:it.remote||null, w:it.w, h:it.h,
+  return {pid:it.pid, name:it.name, src:it.src, remote:it.remote||null, w:it.w, h:it.h,
           fx:it.fx, fy:it.fy, lum:it.lum, busy:it.busy};
 }
 function applyPhoto(it, p){
-  it.name=p.name; it.src=p.src; it.remote=p.remote||null; it.w=p.w; it.h=p.h;
+  it.pid=p.pid; it.name=p.name; it.src=p.src; it.remote=p.remote||null; it.w=p.w; it.h=p.h;
   it.fx=p.fx; it.fy=p.fy; it.lum=p.lum; it.busy=p.busy;
 }
 async function addAlternates(id, files){
