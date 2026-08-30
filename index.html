@@ -428,6 +428,7 @@
   #cloudModal.show, #tplModal.show, #verModal.show{display:grid;place-items:center;}
   #tplModal .sheet, #verModal .sheet{max-width:520px;width:100%;margin:0;}
   #tplText{min-height:120px;font-family:ui-monospace,Consolas,monospace;font-size:12.5px;}
+  .hint.warn{color:var(--warn,#e0a33a);}
   .tpl-preview{
     white-space:pre-wrap;background:var(--panel-2);border:1px solid var(--line-2);
     border-radius:5px;padding:9px 10px;font-size:12.5px;color:var(--txt-dim);min-height:40px;
@@ -3767,6 +3768,8 @@ $("#jsonPicker").addEventListener("change", e=>{
 document.addEventListener("keydown", e=>{
   const typing = /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName);
   if(e.key === "Escape"){
+    if($("#menu").classList.contains("show")){ closeMenu(); return; }
+    if($("#tplModal").classList.contains("show")){ $("#tplModal").classList.remove("show"); return; }
     if(ctxId){ closeCtx(); return; }
     if($("#addModal").classList.contains("show")){ closeAdd(); return; }
     if($("#sliceModal").classList.contains("show")){ closeSlicer(); return; }
@@ -4260,10 +4263,26 @@ function syncAfterSave(){
 }
 
 /* ---- sync UI ---- */
+
+/* Phones and Safari have no folder API, so the Dropbox copy is desktop-only. Rather than
+   open the sheet with an option that can't be taken, explain it once at the foot. */
+function folderFootnoteHTML(){
+  if(FSA_SUPPORTED) return "";
+  return `<p class="hint">Saving straight into a Dropbox folder needs Chrome or Edge on a
+    computer, so it isn't available here. Signing in above is the way this device stays
+    in step — your desktop uploads, this one downloads.</p>`;
+}
+
+/* The one state where a device is quietly alone: writing to Dropbox, but nothing in the
+   cloud, so the phone has no way to reach any of it. */
+function bridgeNoticeHTML(){
+  if(!FS.handle || SYNC.user || !syncConfigured()) return "";
+  return `<p class="hint warn">Your plan is going to <b>${esc(FS.name)}</b>, but your phone
+    can't read a Dropbox folder. Sign in below and it gets a copy too.</p>`;
+}
 function folderBlockHTML(){
   if(!FSA_SUPPORTED){
-    return `<div class="opt"><h3>Save to a folder</h3>
-      <p class="muted">Needs Chrome or Edge — this browser can't open folders.</p></div>`;
+    return "";   // handled as a footnote by folderFootnoteHTML(); see renderSyncUI
   }
   const stamp = t => t ? new Date(t).toLocaleTimeString() : "—";
   if(!FS.handle){
@@ -4317,15 +4336,16 @@ function renderSyncUI(){
     return;
   }
   if(!SYNC.user){
-    body.innerHTML = folderBlockHTML() +
-      `<hr><p class="hint">Sign in and this account's plan — photos included — follows you to
+    body.innerHTML = folderBlockHTML() + bridgeNoticeHTML() +
+      `${FSA_SUPPORTED ? "<hr>" : ""}<p class="hint">Sign in and this account's plan — photos included — follows you to
         your phone and back. You get a one-time link by email; there is no password.</p>
        <div class="field">
          <label>Email</label>
          <input type="email" id="syncEmail" placeholder="you@example.com" autocomplete="email">
        </div>
        <div class="row-btns"><button class="btn primary" id="syncSend">Email me a sign-in link</button></div>
-       <div class="sync-status" id="syncMsg">${esc(SYNC.status || "")}</div>`;
+       <div class="sync-status" id="syncMsg">${esc(SYNC.status || "")}</div>` +
+      folderFootnoteHTML();
     wireFolderBlock();
     $("#syncSend").onclick = async ()=>{
       const email = ($("#syncEmail").value || "").trim();
@@ -4338,7 +4358,7 @@ function renderSyncUI(){
     };
     return;
   }
-  body.innerHTML = folderBlockHTML() + `<hr>` +
+  body.innerHTML = folderBlockHTML() + (FSA_SUPPORTED ? `<hr>` : "") +
     `<p class="connected">✓ Signed in as <b>${esc(SYNC.user.email || "")}</b></p>
      <div class="kv"><span>account</span><b>@${esc(activeProfile().handle)}</b></div>
      <div class="kv"><span>last upload</span><b>${stamp(SYNC.lastPush)}</b></div>
@@ -4350,7 +4370,8 @@ function renderSyncUI(){
        <button class="btn" id="syncDown">Download from cloud</button>
      </div>
      <div class="row-btns"><button class="btn danger" id="syncOut">Sign out</button></div>
-     <div class="sync-status ${SYNC.status ? "err" : ""}" id="syncMsg">${esc(SYNC.status || "")}</div>`;
+     <div class="sync-status ${SYNC.status ? "err" : ""}" id="syncMsg">${esc(SYNC.status || "")}</div>` +
+    folderFootnoteHTML();
   wireFolderBlock();
   $("#syncUp").onclick   = async ()=>{ $("#syncMsg").textContent = "Uploading…";
                                        $("#syncMsg").textContent = await syncPush() ? "Uploaded." : (SYNC.status || "Upload failed."); };
