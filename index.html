@@ -4113,7 +4113,21 @@ function switchProfile(id){
   saveProfiles();
   resetPlanState();
   bootReady = false;                       // same rule when swapping accounts
-  loadAsync().then(()=>{ bootReady = true; maybeSeed(); render(); prevSnap = takeSnap(); updateSaveUI(); renderProfiles(); });
+  loadAsync().then(async ()=>{
+    /* Switching to an account this device has never opened must be able to reach into
+       the cloud for it, or the switcher lists accounts that come up empty. */
+    if(SYNC.user && !Object.keys(state.items).length){
+      try{
+        const remote = await syncFetch(planPath(id));
+        if(remote && remote.items && Object.keys(remote.items).length){
+          await planPut(id, remote);
+          adopt(remote);
+          await restorePhotos();
+        }
+      }catch(_){ }
+    }
+    bootReady = true; maybeSeed(); render(); prevSnap = takeSnap(); updateSaveUI(); renderProfiles();
+  });
   render();
   prevSnap = takeSnap();
   updateSaveUI(); renderProfiles();
@@ -4546,7 +4560,7 @@ async function syncPush(){
       {upsert:true, contentType:"application/json"});
     let r = await put(planPath(state.profileId), await serializeFull());
     if(r.error) throw new Error(r.error.message);
-    r = await put(manifestPath(), {profiles, savedAt:new Date().toISOString()});
+    r = await put(manifestPath(), {profiles, active:state.profileId, savedAt:new Date().toISOString()});
     if(r.error) throw new Error(r.error.message);
     SYNC.lastPush = Date.now(); SYNC.status = "";
     renderSyncUI();
@@ -4567,6 +4581,64 @@ async function syncFetch(path){
 
 /* Never overwrites silently: if the cloud copy is newer and this device also has work,
    ask which one wins. */
+/* Every account this user has, not just the one this device happens to be looking at.
+   A new device makes its own local profile with its own random id, so pulling only the
+   active profile asks the cloud for a file that can never exist -- which is why signing
+   in on a second device showed an empty grid while the data sat safely in storage. */
+async function syncPullAll(opts){
+  const silent = opts && opts.silent;
+  if(!SYNC.user) return false;
+  const man = await syncFetch(manifestPath());
+  if(!man || !Array.isArray(man.profiles) || !man.profiles.length){
+    if(!silent) toast("Nothing in the cloud yet");
+    return false;
+  }
+  const known = new Set(profiles.map(p => p.id));
+  let added = 0;
+  for(const p of man.profiles) if(p && p.id && !known.has(p.id)){ profiles.push(p); added++; }
+  if(added){ saveProfiles(); renderProfiles(); }
+
+  /* Fetch each account's plan into local storage. The active one goes through the usual
+     reconcile so work in progress is never replaced silently; the others are simply
+     stored, ready for when you switch to them. */
+  let stored = 0;
+  for(const p of man.profiles){
+    if(!p || !p.id || p.id === state.profileId) continue;
+    try{
+      const remote = await syncFetch(planPath(p.id));
+      if(!remote) continue;
+      const mine = await planGet(p.id).catch(()=>null);
+      const mineAt   = mine   ? (Date.parse(mine.savedAt   || 0) || 0) : 0;
+      const remoteAt = Date.parse(remote.savedAt || 0) || 0;
+      if(remoteAt > mineAt){ await planPut(p.id, remote); stored++; }
+    }catch(_){ }
+  }
+
+  /* A device with nothing of its own should land on an account that actually has work,
+     rather than the blank profile it invented for itself thirty seconds ago. */
+  /* A new device seeds the starter feed, so 'empty' has to mean 'nothing of yours'
+     rather than 'no tiles at all' -- otherwise the demo photos are enough to keep your
+     real accounts hidden behind the switcher. */
+  const ids = Object.keys(state.items);
+  const seedOnly = ids.length > 0 && ids.every(id => id.startsWith("seed"));
+  const emptyHere = (!state.grid.length && !state.tray.length) || seedOnly;
+  const activeHasCloud = man.profiles.some(p => p && p.id === state.profileId);
+  if(emptyHere && !activeHasCloud){
+    const wanted = man.active && man.profiles.some(p => p.id === man.active)
+                 ? man.active : man.profiles[0].id;
+    if(wanted && wanted !== state.profileId && profiles.some(p => p.id === wanted)){
+      switchProfile(wanted);
+      if(!silent) toast("Loaded @" + (activeProfile().handle || "your feed") + " from the cloud");
+      SYNC.lastPull = Date.now(); renderSyncUI();
+      return true;
+    }
+  }
+  const got = await syncPull({silent:true});
+  if(!silent && !got) toast(stored ? `Synced ${stored} account${stored>1?"s":""}` : "Already up to date");
+  SYNC.lastPull = Date.now(); renderSyncUI();
+  return true;
+}
+
 async function syncPull(opts){
   const silent = opts && opts.silent;
   if(!SYNC.user || SYNC.busy) return false;
@@ -4736,7 +4808,7 @@ function renderSyncUI(){
   wireFolderBlock();
   $("#syncUp").onclick   = async ()=>{ $("#syncMsg").textContent = "Uploading…";
                                        $("#syncMsg").textContent = await syncPush() ? "Uploaded." : (SYNC.status || "Upload failed."); };
-  $("#syncDown").onclick = async ()=>{ $("#syncMsg").textContent = "Checking…"; await syncPull({}); };
+  $("#syncDown").onclick = async ()=>{ $("#syncMsg").textContent = "Checking…"; await syncPullAll({}); };
   $("#syncOut").onclick  = syncSignOut;
 }
 
@@ -4785,7 +4857,7 @@ updateSaveUI();
   const user = await syncSession();
   if(!user) return;
   renderSyncUI();
-  await syncPull({silent:true});
+  await syncPullAll({silent:true});
 })();
 
 (async ()=>{
