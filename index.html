@@ -199,6 +199,60 @@
     pointer-events:none;
   }
 
+  /* Holding over the middle arms a stack. Until the hold completes this is only a
+     candidate, drawn quietly so a passing cursor never looks like a commitment. */
+  .tile.drop-onto-wait{
+    box-shadow:inset 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent);
+  }
+  .tile.drop-onto-wait.drop-onto-wait::after{
+    content:"hold to stack";position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
+    z-index:8;background:rgba(12,12,14,.82);color:var(--accent);font-size:9px;font-weight:700;
+    letter-spacing:.5px;text-transform:uppercase;padding:3px 8px;border-radius:9px;
+    pointer-events:none;
+    animation:stackHold var(--stack-dwell,1s) linear forwards;
+  }
+  /* the label fills toward the accent as the hold completes, so the wait is visible */
+  @keyframes stackHold{
+    from{ box-shadow:inset 0 0 0 0 var(--accent); }
+    to  { box-shadow:inset 90px 0 0 0 color-mix(in srgb, var(--accent) 22%, transparent); }
+  }
+
+  /* ---------- motion ----------
+     One set of curves and durations, so nothing in the app moves to its own rhythm.
+     --ease-out is the decelerating curve used for anything entering or settling;
+     --ease is the gentler one for things that merely adjust. */
+  :root{
+    --ease:cubic-bezier(.2,.8,.2,1);
+    --ease-out:cubic-bezier(.16,1,.3,1);
+    --t-fast:.13s;
+    --t-mid:.2s;
+    --t-slow:.32s;
+    --stack-dwell:1s;
+  }
+  /* Honour the OS setting in one place rather than per-rule. */
+  @media (prefers-reduced-motion: reduce){
+    *,*::before,*::after{
+      animation-duration:.01ms !important;
+      animation-iteration-count:1 !important;
+      transition-duration:.01ms !important;
+      scroll-behavior:auto !important;
+    }
+  }
+
+  /* ---------- small screens ----------
+     Breakpoints live in JS as well (applyLayout), because root zoom is invisible to CSS
+     media queries; these are the purely visual adjustments that don't depend on it. */
+  html.tight header{padding:8px 10px;gap:8px;}
+  html.tight .wrap{padding:10px;}
+  html.tight #tray{max-height:38vh;}
+  html.tight .sheet,html.tight .add-sheet{max-width:none;margin:0;border-radius:12px;}
+  html.tight #addModal,html.tight #syncModal,html.tight #cloudModal,
+  html.tight #tplModal{padding:12px;}
+  html.tight .row-btns{flex-wrap:wrap;}
+  html.tight .row-btns .btn{flex:1 1 auto;min-width:0;}
+  /* the inspector stops being a rail and becomes a sheet from the bottom */
+  /* the inspector already becomes a bottom sheet under (pointer:coarse) further down */
+
   /* tile chrome */
   .idx{
     position:absolute;top:3px;left:4px;z-index:5;
@@ -330,14 +384,14 @@
     .tile img{transition:transform .45s cubic-bezier(.2,.8,.2,1);}
     .tile:hover img{transform:scale(1.045);}
     .tile.dragging img,.tile.cropping img{transition:none;transform:none;}
-    .grade{transition:transform .2s cubic-bezier(.2,.8,.2,1);}
+    .grade{transition:transform var(--t-mid) var(--ease);}
     .tile:hover .grade{transform:scale(1.18);}
     .tools button{transition:background .14s ease,color .14s ease,transform .14s ease;}
     .tools button:hover{transform:translateY(-1px);}
     .tools,.idx{transition:opacity .16s ease;}
-    .sheet,.slice-sheet{animation:sheetIn .24s cubic-bezier(.2,.8,.2,1);}
-    .menu.show{animation:menuIn .15s cubic-bezier(.2,.8,.2,1);}
-    .tray .tile{transition:transform .2s cubic-bezier(.2,.8,.2,1),box-shadow .18s ease;}
+    .sheet,.slice-sheet{animation:sheetIn var(--t-slow) var(--ease-out);}
+    .menu.show{animation:menuIn var(--t-fast) var(--ease-out);}
+    .tray .tile{transition:transform var(--t-mid) var(--ease),box-shadow var(--t-mid) ease;}
     .tray .tile:hover{transform:translateY(-3px);}
   }
   @keyframes sheetIn{from{opacity:0;transform:translateY(12px) scale(.985);}to{opacity:1;transform:none;}}
@@ -380,7 +434,7 @@
   #inspector{
     position:fixed;top:0;right:0;bottom:0;width:312px;z-index:60;
     background:var(--panel);border-left:1px solid var(--line);
-    transform:translateX(100%);transition:transform .18s ease;
+    transform:translateX(100%);transition:transform var(--t-slow) var(--ease-out);
     display:flex;flex-direction:column;overflow-y:auto;
   }
   #inspector.open{transform:none;box-shadow:-30px 0 60px -40px #000;}
@@ -2415,9 +2469,25 @@ function stopAutoScroll(){
   if(scrollRAF){ cancelAnimationFrame(scrollRAF); scrollRAF = null; }
 }
 
+/* Dropping one photo onto another merges them, which is destructive enough that brushing
+   past a tile should never trigger it. The centre only arms after a deliberate hold. */
+const STACK_DWELL_MS = 1000;
+let dwell = { id:null, timer:null, armed:false };
+function resetDwell(){
+  if(dwell.timer) clearTimeout(dwell.timer);
+  dwell = { id:null, timer:null, armed:false };
+}
+/* dragover only fires while the pointer moves, so holding perfectly still would otherwise
+   never complete the hold: the timer arms it, and re-paints the mark itself. */
+function noteDwell(id, onArmed){
+  if(dwell.id === id) return;
+  if(dwell.timer) clearTimeout(dwell.timer);
+  dwell = { id, armed:false, timer:setTimeout(()=>{ dwell.armed = true; onArmed(); }, STACK_DWELL_MS) };
+}
+
 function clearMark(){
   if(!dropMark) return;
-  if(dropMark.el) dropMark.el.classList.remove("drop-before","drop-after","drop-onto");  // el is null when the zone is empty
+  if(dropMark.el) dropMark.el.classList.remove("drop-before","drop-after","drop-onto","drop-onto-wait");  // el is null when the zone is empty
   dropMark = null;
 }
 function computeDrop(container, e){
@@ -2472,7 +2542,7 @@ document.addEventListener("dragstart", e=>{
 });
 document.addEventListener("dragend", ()=>{
   $$(".tile.dragging").forEach(el=>el.classList.remove("dragging"));
-  clearMark(); dragId = null; stopAutoScroll();
+  clearMark(); resetDwell(); dragId = null; stopAutoScroll();
   $("#tray").classList.remove("over");
 });
 document.addEventListener("dragover", e=>{
@@ -2492,12 +2562,29 @@ document.addEventListener("dragover", e=>{
     base = blocks.indexOf(cont) * 3;
   }
   const d = computeDrop(cont, e);
+  let side = d.side;
+  if(side === "onto"){
+    const tid = d.el.dataset.id;
+    noteDwell(tid, ()=>{
+      /* the hold completed while the pointer sat still: promote the mark in place */
+      if(dropMark && dropMark.el && dropMark.el.dataset.id === tid){
+        dropMark.el.classList.remove("drop-onto-wait");
+        dropMark.el.classList.add("drop-onto");
+        dropMark.side = "onto";
+        dropMark.target.ontoId = tid;
+      }
+    });
+    if(!(dwell.armed && dwell.id === tid)) side = "onto-wait";
+  }else{
+    resetDwell();
+  }
   clearMark();
-  if(d.el) d.el.classList.add(d.side==="onto" ? "drop-onto"
-                            : d.side==="after" ? "drop-after" : "drop-before");
-  dropMark = { el: d.el, side: d.side,
+  if(d.el) d.el.classList.add(side==="onto" ? "drop-onto"
+                            : side==="onto-wait" ? "drop-onto-wait"
+                            : side==="after" ? "drop-after" : "drop-before");
+  dropMark = { el: d.el, side,
                target: { zone, index: base + d.index,
-                         ontoId: d.side==="onto" ? d.el.dataset.id : null } };
+                         ontoId: side==="onto" ? d.el.dataset.id : null } };
 }, true);
 
 document.addEventListener("drop", e=>{
@@ -2508,7 +2595,7 @@ document.addEventListener("drop", e=>{
   stopAutoScroll();
   const t = dropMark && dropMark.target;
   const id = dragId;
-  clearMark(); dragId = null;
+  clearMark(); resetDwell(); dragId = null;
   $("#tray").classList.remove("over");
   if(t && t.ontoId){ stackOnto(id, t.ontoId); return; }
   if(t) moveTo(id, t.zone, t.index);
@@ -3758,9 +3845,20 @@ function applyLayout(){
   root.style.setProperty("--rail", eff < 1000 ? "112px" : eff < 1180 ? "132px" : "214px");
   const compact = eff < 760;
   root.classList.toggle("compact", compact);
+  const tight = eff < 560;
+  root.classList.toggle("tight", tight);          // phone-sized: the rail becomes a sheet
+  root.style.setProperty("--sheet-max", Math.round(window.innerHeight * 0.8 / (state.scale || 1)) + "px");
   applyCompactHeader(compact);
 }
-window.addEventListener("resize", applyLayout);
+/* Resizing fires far faster than the screen repaints, and each pass re-reads layout.
+   Coalescing to one run per frame is the difference between a smooth drag of the window
+   edge and a stuttering one. */
+let layoutRAF = null;
+window.addEventListener("resize", ()=>{
+  if(layoutRAF) return;
+  layoutRAF = requestAnimationFrame(()=>{ layoutRAF = null; applyLayout(); });
+});
+window.addEventListener("orientationchange", applyLayout);
 
 function applyScale(){
   document.documentElement.style.zoom = state.scale;
