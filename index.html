@@ -1125,6 +1125,21 @@ function showBanner(html, withExport){
 }
 function hideBanner(){ $("#banner").classList.remove("show"); }
 
+/* A newer copy somewhere else is never an emergency, so it must never block the app.
+   Offer it in the banner and let the work carry on around it. */
+function offerNewer(where, when, onTake, onKeep){
+  const b = $("#banner");
+  b.innerHTML =
+    `A newer copy of this account is in <b>${esc(where)}</b> (${new Date(when).toLocaleString()}). ` +
+    `<button class="btn" id="offerTake">Load it</button> ` +
+    `<button class="btn" id="offerKeep">Keep this device's</button> ` +
+    `<button class="btn" id="bannerHide">Dismiss</button>`;
+  b.classList.add("show");
+  $("#offerTake").onclick = ()=>{ hideBanner(); onTake(); };
+  $("#offerKeep").onclick = ()=>{ hideBanner(); onKeep(); };
+  $("#bannerHide").onclick = hideBanner;
+}
+
 let toastTimer;
 function toast(msg, actionLabel, onAction){
   const t = $("#toast");
@@ -4130,20 +4145,24 @@ async function folderCheck(opts){
       if(!silent) toast("Folder copy matches this device");
       return false;
     }
-    /* Whichever way this goes, the file has now been reconciled — never ask twice
-       about the same stamp, however the answer turns out. */
+    /* Reconciled either way — never raise the same stamp twice. */
     markSeen(state.profileId, remote.savedAt);
-    const takeIt = confirm(
-      "The copy in " + FS.name + " is newer (" + new Date(remoteAt).toLocaleString() + ").\n\n" +
-      "OK — load it and replace what is on this device.\n" +
-      "Cancel — keep this device\'s version and overwrite the file.");
-    if(!takeIt){ folderWrite(JSON.stringify(serialize(true)), true); return false; }
-    adopt(remote);
-    render(); prevSnap = takeSnap();
-    try{ localStorage.setItem(planKey(state.profileId), JSON.stringify(serialize(false))); }catch(_){ }
-    renderProfiles(); renderSyncUI();
-    toast("Loaded the newer copy from " + FS.name);
-    return true;
+
+    const take = ()=>{
+      adopt(remote);
+      render(); prevSnap = takeSnap();
+      try{ localStorage.setItem(planKey(state.profileId), JSON.stringify(serialize(false))); }catch(_){ }
+      renderProfiles(); renderSyncUI();
+      toast("Loaded the newer copy from " + FS.name);
+    };
+    /* Nothing on this device to lose: just open it, which is what someone arriving
+       at a second machine actually wants. */
+    if(!state.grid.length && !state.tray.length){ take(); return true; }
+
+    offerNewer(FS.name, remoteAt, take,
+               ()=>{ folderWrite(JSON.stringify(serialize(true)), true);
+                     toast("Kept this device's version"); });
+    return false;
   }finally{ folderChecking = false; }
 }
 window.addEventListener("focus", ()=>folderCheck({silent:true}));
@@ -4152,7 +4171,7 @@ window.addEventListener("focus", ()=>folderCheck({silent:true}));
 /* One JSON file per account in Supabase Storage at <uid>/<profileId>.json, plus a
    <uid>/profiles.json manifest so a new device learns which accounts exist. localStorage
    stays the source of truth; this is a mirror. Signed out, none of it runs. */
-const SYNC = { client:null, user:null, busy:false, lastPull:0, lastPush:0, status:"" };
+const SYNC = { client:null, user:null, busy:false, lastPull:0, lastPush:0, status:"", offered:"" };
 
 function syncConfig(){
   try{
@@ -4262,21 +4281,27 @@ async function syncPull(opts){
     const remoteAt = Date.parse(remote.savedAt || 0) || 0;
     if(remoteAt <= localAt){ if(!silent) toast("Already up to date"); return false; }
 
-    if((state.grid.length || state.tray.length) && localAt && !silent){
-      const takeIt = confirm(
-        "The cloud copy of @" + activeProfile().handle + " is newer (" +
-        new Date(remoteAt).toLocaleString() + ").\n\n" +
-        "OK — replace this device\'s version with it.\n" +
-        "Cancel — keep this device\'s version and push it up instead.");
-      if(!takeIt){ SYNC.busy = false; return await syncPush(); }
+    const applyRemote = ()=>{
+      adopt(remote);
+      render();
+      prevSnap = takeSnap();
+      clearTimeout(saveTimer); saveNow();
+      SYNC.lastPull = Date.now();
+      renderSyncUI();
+      toast("Pulled the cloud copy of this account");
+    };
+
+    /* Same rule as the folder: work on this device is never replaced behind your back,
+       but an empty device just opens the plan. */
+    if((state.grid.length || state.tray.length) && localAt && silent){
+      if(SYNC.offered === remote.savedAt) return false;   // asked once already
+      SYNC.offered = remote.savedAt;
+      SYNC.busy = false;
+      offerNewer("the cloud", remoteAt, applyRemote,
+                 ()=>{ syncPush().then(ok=>toast(ok ? "Kept this device's version" : "Upload failed")); });
+      return false;
     }
-    adopt(remote);
-    render();
-    prevSnap = takeSnap();
-    clearTimeout(saveTimer); saveNow();
-    SYNC.lastPull = Date.now();
-    renderSyncUI();
-    toast("Pulled the cloud copy of this account");
+    applyRemote();
     return true;
   }catch(e){
     SYNC.status = e.message || String(e);
