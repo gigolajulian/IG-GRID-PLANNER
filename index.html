@@ -964,6 +964,146 @@ const uid = () => Math.random().toString(36).slice(2,10) + Date.now().toString(3
 const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
 const esc = s => String(s??"").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 
+/* ============================ photo store ============================ */
+/* Photos used to live as base64 inside the plan JSON in localStorage, which capped the
+   whole app at ~5MB, inflated every image by a third, and rewrote every byte on every
+   save. They now live as Blobs in IndexedDB, one record each: no meaningful size limit,
+   no encoding overhead, and nudging a tile writes a few hundred bytes instead of megabytes.
+
+   In memory nothing changes — it.src is still a URL you can put in an <img>. It is just
+   an object URL over a Blob rather than a data: URL, so the rest of the app is untouched. */
+const PHOTO_DB = "gridplanner-photos";
+
+function pdb(){
+  return new Promise((res, rej) => {
+    const r = indexedDB.open(PHOTO_DB, 1);
+    r.onupgradeneeded = () => {
+      const db = r.result;
+      if(!db.objectStoreNames.contains("photos")) db.createObjectStore("photos");
+      if(!db.objectStoreNames.contains("plans"))  db.createObjectStore("plans");
+    };
+    r.onsuccess = () => res(r.result);
+    r.onerror  = () => rej(r.error);
+  });
+}
+function pdbDo(store, mode, fn){
+  return pdb().then(db => new Promise((res, rej) => {
+    const tx = db.transaction(store, mode);
+    const os = tx.objectStore(store);
+    let out;
+    try{ out = fn(os); }catch(e){ rej(e); return; }
+    tx.oncomplete = () => res(out && out.result !== undefined ? out.result : out);
+    tx.onerror    = () => rej(tx.error);
+    tx.onabort    = () => rej(tx.error);
+  }));
+}
+const photoPut = (id, blob) => pdbDo("photos", "readwrite", os => os.put(blob, id));
+const photoGet = id         => pdbDo("photos", "readonly",  os => os.get(id));
+const photoDel = id         => pdbDo("photos", "readwrite", os => os.delete(id));
+const photoKeys = ()        => pdbDo("photos", "readonly",  os => os.getAllKeys());
+const planPut  = (id, obj)  => pdbDo("plans",  "readwrite", os => os.put(obj, id));
+const planKeysAll = ()    => pdbDo("plans",  "readonly",  os => os.getAllKeys());
+const planGetAll  = ()    => pdbDo("plans",  "readonly",  os => os.getAll());
+
+/* Removing a tile must not delete its photo — Undo would have nothing to restore. Orphans
+   are swept on the next boot instead, once no stored plan refers to them any more. */
+async function gcPhotos(){
+  try{
+    const plans = await planGetAll();
+    const live = new Set();
+    for(const p of plans || []) for(const id in (p && p.items) || {}) live.add(id);
+    for(const id in state.items) live.add(id);
+    const keys = await photoKeys();
+    let freed = 0;
+    for(const k of keys || []) if(!live.has(k)){ await photoDel(k); freed++; }
+    return freed;
+  }catch(_){ return 0; }
+}
+const planGet  = id         => pdbDo("plans",  "readonly",  os => os.get(id));
+
+/* Chrome may evict "best effort" storage when the disk fills. Asking once makes the
+   plan durable; being refused is not an error, just a weaker promise. */
+async function askPersistence(){
+  try{
+    if(navigator.storage && navigator.storage.persist && !(await navigator.storage.persisted()))
+      await navigator.storage.persist();
+  }catch(_){ }
+}
+
+const dataUrlToBlob = async url => (await fetch(url)).blob();
+function blobToDataUrl(blob){
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result);
+    r.onerror = () => rej(r.error);
+    r.readAsDataURL(blob);
+  });
+}
+
+/* Object URLs are revoked when the photo they point at is replaced or removed, so a long
+   editing session doesn't leak every image it has ever shown. */
+const objectUrls = new Map();
+function urlForBlob(id, blob){
+  const old = objectUrls.get(id);
+  if(old) URL.revokeObjectURL(old);
+  const url = URL.createObjectURL(blob);
+  objectUrls.set(id, url);
+  return url;
+}
+function forgetPhoto(id){
+  const old = objectUrls.get(id);
+  if(old){ URL.revokeObjectURL(old); objectUrls.delete(id); }
+  photoDel(id).catch(()=>{});
+}
+
+/* Write any photo the store doesn't have yet. Blobs are content we already hold, so this
+   is a copy, never a re-encode. */
+const photoSrcSeen = new Map();   // id -> the src we last wrote, so a replaced photo is noticed
+async function persistPhotos(){
+  const have = new Set(await photoKeys().catch(()=>[]));
+  for(const id in state.items){
+    const it = state.items[id];
+    if(!it.src) continue;
+    if(have.has(id) && photoSrcSeen.get(id) === it.src) continue;
+    try{
+      const blob = it.src.startsWith("blob:") ? await (await fetch(it.src)).blob()
+                                              : await dataUrlToBlob(it.src);
+      await photoPut(id, blob);
+      if(!it.src.startsWith("blob:")) it.src = urlForBlob(id, blob);   // drop the base64 copy
+      photoSrcSeen.set(id, it.src);
+    }catch(_){ }                                                        // a failed photo is not a failed save
+  }
+}
+
+/* Rehydrate after a load: every item that has a stored photo gets a usable src back. */
+async function restorePhotos(){
+  for(const id in state.items){
+    const it = state.items[id];
+    if(it.src) continue;
+    try{
+      const blob = await photoGet(id);
+      if(blob){ it.src = urlForBlob(id, blob); photoSrcSeen.set(id, it.src); }
+    }catch(_){ }
+  }
+}
+
+/* The portable form: base64 inline, as every export, folder file and cloud upload needs.
+   Async because the bytes now live in a store rather than in the plan object. */
+async function serializeFull(forExport){
+  const out = serialize(false, forExport);
+  out.imagesDropped = false;
+  for(const id in out.items){
+    const it = state.items[id];
+    if(!it || !it.src) continue;
+    try{
+      const blob = it.src.startsWith("blob:") ? await (await fetch(it.src)).blob()
+                                              : await dataUrlToBlob(it.src);
+      out.items[id].src = await blobToDataUrl(blob);
+    }catch(_){ }
+  }
+  return out;
+}
+
 /* ============================ persistence ============================ */
 function serialize(withImages, forExport){
   const items = {};
@@ -984,6 +1124,10 @@ function serialize(withImages, forExport){
 }
 
 let saveTimer = null, lastSavedAt = null, saveDirty = false, saveFailed = false;
+/* Nothing may be written until the stored plan has been read. An autosave that lands
+   during boot would persist the empty state the app starts in, over the real plan. */
+let bootReady = false;
+let allowEmptySave = false;   // set only by an explicit Clear / delete
 
 /* The plan autosaves constantly; this just makes that visible, because "is my work
    safe?" is not a question you should have to answer by guessing. */
@@ -1010,56 +1154,82 @@ function save(){
   clearTimeout(saveTimer);
   saveTimer = setTimeout(saveNow, 350);
 }
-function saveNow(){
+async function saveNow(){
   clearTimeout(saveTimer);
-  const full = JSON.stringify(serialize(true));
-  /* A connected folder has no quota, so it is the durable copy. Fire it first and always,
-     whatever localStorage then does. */
-  folderWrite(full);
+  if(!bootReady) return;
+  /* Never let an empty session overwrite a stored plan that still has photos in it.
+     Emptiness is almost always a load that went wrong, not work you did. Clearing on
+     purpose sets allowEmptySave, which is the only way this can happen. */
+  if(!allowEmptySave && !Object.keys(state.items).length){
+    try{
+      const stored = await planGet(state.profileId);
+      if(stored && stored.items && Object.keys(stored.items).length){
+        saveDirty = false; updateSaveUI();
+        return;
+      }
+    }catch(_){ }
+  }
+  /* Structure first and separately from pixels: this is the write that happens on every
+     nudge, and it is now a few hundred bytes rather than the whole feed. */
+  const plan = serialize(false);
   try{
-    // with a folder connected, localStorage is only a fast index — the pixels live on disk
-    localStorage.setItem(planKey(state.profileId),
-                         FS.handle ? JSON.stringify(serialize(false)) : full);
-    if(state.imagesDropped && !FS.handle){ state.imagesDropped = false; }
+    await planPut(state.profileId, plan);
+    await persistPhotos();
     lastSavedAt = Date.now(); saveDirty = false; saveFailed = false;
+    state.imagesDropped = false;
     updateSaveUI();
     hideBanner();
   }catch(err){
     saveFailed = true; saveDirty = false; updateSaveUI();
-    // quota blown — keep the plan (order/crops/notes/state) without the pixels
-    try{
-      localStorage.setItem(planKey(state.profileId), JSON.stringify(serialize(false)));
-      state.imagesDropped = true;
-      if(FS.handle && !FS.denied){ hideBanner(); syncAfterSave(); return; }
-      showBanner(
-        "Storage quota exceeded — your layout, crops and notes are saved, but the <b>photos are not</b>. " +
-        (FSA_SUPPORTED
-          ? "Connect a folder under <b>⋯ → Cloud sync</b> and they will be written to disk instead, with no limit. "
-          : "") +
-        "Or export the plan to a JSON file to keep everything.",
-        true
-      );
-    }catch(_){
-      try{ localStorage.removeItem(planKey(state.profileId)); }catch(__){}
-      if(FS.handle && !FS.denied){
-        showBanner("This browser's storage is full, so nothing is cached here — but the full plan, photos included, is written to <b>" +
-                   esc(FS.name) + "</b> on every change.", false);
-      }else{
-        showBanner("Storage quota exceeded and nothing could be saved to this browser. Export your plan now — closing this tab will lose it.", true);
-      }
-    }
+    showBanner("Couldn't save to this browser's storage (" + esc(err.message || String(err)) +
+               "). Your work is still on screen — export the plan to be safe.", true);
   }
-  syncAfterSave();     // runs whether or not localStorage coped
+  /* A tiny mirror in localStorage so a first paint can happen without waiting on
+     IndexedDB, and so an older build still finds something. Never the pixels. */
+  try{ localStorage.setItem(planKey(state.profileId), JSON.stringify(plan)); }catch(_){ }
+
+  if(FS.handle && !FS.denied){
+    try{ folderWrite(JSON.stringify(await serializeFull())); }catch(_){ }
+  }
+  syncAfterSave();
 }
-function load(){
-  let raw;
-  try{ raw = localStorage.getItem(planKey(state.profileId)); }catch(_){ return; }
-  if(!raw) return;
-  try{ adopt(JSON.parse(raw)); }catch(_){ }
-  if(state.imagesDropped){
-    showBanner("Loaded from browser storage, but the photos were dropped earlier because of the storage quota. Re-add them, or import a JSON plan.", true);
+/* Boot: prefer the IndexedDB plan, fall back to whatever localStorage still holds (which
+   is how a plan written by an older build, photos and all, gets carried over exactly once). */
+async function loadAsync(){
+  let plan = null;
+  try{ plan = await planGet(state.profileId); }catch(_){ }
+  /* An empty record must never shadow a plan that still has work in it: that is how a
+     single bad write turns into an empty grid and a plan you cannot see. */
+  const itemCount = p => p && p.items ? Object.keys(p.items).length : 0;
+  let migrating = false;
+  if(itemCount(plan) === 0){
+    let lsRaw = null;
+    try{ lsRaw = localStorage.getItem(planKey(state.profileId)); }catch(_){ }
+    let lsPlan = null;
+    try{ lsPlan = lsRaw ? JSON.parse(lsRaw) : null; }catch(_){ }
+    if(itemCount(lsPlan) > 0){ plan = lsPlan; migrating = true; }
+  }
+  if(!plan){
+    let raw = null;
+    try{ raw = localStorage.getItem(planKey(state.profileId)); }catch(_){ }
+    if(!raw) return;
+    try{ plan = JSON.parse(raw); }catch(_){ return; }
+    migrating = true;
+  }
+  try{ adopt(plan); }catch(_){ return; }
+  await restorePhotos();
+  if(migrating){
+    /* Move the base64 pixels out of localStorage and into the store, once. */
+    await persistPhotos();
+    try{ await planPut(state.profileId, serialize(false)); }catch(_){ }
+    try{ localStorage.setItem(planKey(state.profileId), JSON.stringify(serialize(false))); }catch(_){ }
+  }
+  const lost = Object.values(state.items).filter(i => !i.src && !i.remote).length;
+  if(lost){
+    showBanner("Some photos couldn't be found in this browser's storage. Re-add them, or import a JSON plan.", true);
   }
 }
+function load(){ /* kept for callers that expect the old synchronous name */ }
 function adopt(data){
   if(!data || typeof data!=="object" || !data.items) throw new Error("bad plan");
   const items = {};
@@ -1068,7 +1238,9 @@ function adopt(data){
     items[id] = {
       id,
       name: s.name || "",
-      src: s.src || null,
+      /* Plans are stored without pixels now, so adopting one must never be what erases
+         a photo we are already holding. Only an explicit new src replaces the old. */
+      src: s.src || ((state.items[id] && state.items[id].src) || null),
       remote: s.remote || null,          // CDN url when the pixels couldn't be copied locally
       w: s.w||0, h: s.h||0,
       fx: typeof s.fx==="number" ? s.fx : 50,
@@ -3744,7 +3916,9 @@ $("#btnClear").onclick = ()=>{
   state.items = {}; state.grid = []; state.tray = [];
   state.selId = null; state.cropId = null;
   try{ localStorage.removeItem(planKey(state.profileId)); }catch(_){}
+  allowEmptySave = true;                 // you asked for empty; that is allowed to stick
   hideBanner(); render(); save();
+  setTimeout(()=>{ allowEmptySave = false; }, 4000);
 };
 
 $("#btnSeed").onclick = ()=>{
@@ -3754,8 +3928,8 @@ $("#btnSeed").onclick = ()=>{
   if(maybeSeed(true)){ save(); toast("Starter feed reloaded"); }
 };
 
-function exportPlan(){
-  const blob = new Blob([JSON.stringify(serialize(true, true), null, 1)], {type:"application/json"});
+async function exportPlan(){
+  const blob = new Blob([JSON.stringify(await serializeFull(true), null, 1)], {type:"application/json"});
   const a = document.createElement("a");
   const d = new Date(), p = n => String(n).padStart(2,"0");
   a.href = URL.createObjectURL(blob);
@@ -3840,8 +4014,8 @@ function switchProfile(id){
   state.profileId = id;
   saveProfiles();
   resetPlanState();
-  load();
-  maybeSeed();
+  bootReady = false;                       // same rule when swapping accounts
+  loadAsync().then(()=>{ bootReady = true; maybeSeed(); render(); prevSnap = takeSnap(); updateSaveUI(); renderProfiles(); });
   render();
   prevSnap = takeSnap();
   updateSaveUI(); renderProfiles();
@@ -3880,8 +4054,9 @@ function deleteProfile(){
   state.profileId = profiles[0].id;
   saveProfiles();
   resetPlanState();
-  load(); render();
-  prevSnap = takeSnap(); updateSaveUI(); renderProfiles();
+  bootReady = false;
+  loadAsync().then(()=>{ bootReady = true; render(); prevSnap = takeSnap(); updateSaveUI(); renderProfiles(); });
+  render();
   toast(`Deleted @${p.handle}`);
 }
 
@@ -4068,10 +4243,10 @@ async function connectFolder(){
       offerNewer(handle.name, theirsAt,
         ()=>{ adopt(existing); render(); prevSnap = takeSnap(); save();
               toast("Loaded the copy from " + handle.name); },
-        ()=>{ folderWrite(JSON.stringify(serialize(true)), true);
+        async ()=>{ folderWrite(JSON.stringify(await serializeFull()), true);
               toast("Kept this device's version"); });
     }else{
-      await folderWrite(JSON.stringify(serialize(true)), true);
+      await folderWrite(JSON.stringify(await serializeFull()), true);
     }
     // localStorage no longer needs the pixels
     try{ localStorage.setItem(planKey(state.profileId), JSON.stringify(serialize(false))); }catch(_){ }
@@ -4089,7 +4264,7 @@ async function connectFolder(){
 async function disconnectFolder(){
   FS.handle = null; FS.name = ""; FS.status = "";
   try{ await idbSet("folder", null); }catch(_){ }
-  try{ localStorage.setItem(planKey(state.profileId), JSON.stringify(serialize(true))); }catch(_){ }
+  try{ localStorage.setItem(planKey(state.profileId), JSON.stringify(serialize(false))); }catch(_){ }
   renderSyncUI();
   toast("Folder disconnected — back to browser storage");
 }
@@ -4192,7 +4367,7 @@ async function folderCheck(opts){
     if(!state.grid.length && !state.tray.length){ take(); return true; }
 
     offerNewer(FS.name, remoteAt, take,
-               ()=>{ folderWrite(JSON.stringify(serialize(true)), true);
+               async ()=>{ folderWrite(JSON.stringify(await serializeFull()), true);
                      toast("Kept this device's version"); });
     return false;
   }finally{ folderChecking = false; }
@@ -4271,7 +4446,7 @@ async function syncPush(){
     const put = (path, obj) => sb.storage.from("plans").upload(
       path, new Blob([JSON.stringify(obj)], {type:"application/json"}),
       {upsert:true, contentType:"application/json"});
-    let r = await put(planPath(state.profileId), serialize(true));
+    let r = await put(planPath(state.profileId), await serializeFull());
     if(r.error) throw new Error(r.error.message);
     r = await put(manifestPath(), {profiles, savedAt:new Date().toISOString()});
     if(r.error) throw new Error(r.error.message);
@@ -4483,9 +4658,16 @@ $("#cloudModal").addEventListener("click", e=>{ if(e.target.id === "cloudModal")
 
 /* ============================ boot ============================ */
 loadProfiles();
-load();
+askPersistence();
 render();
-if(!maybeSeed()) render();
+loadAsync().then(()=>{
+  bootReady = true;
+  render();
+  if(!maybeSeed()) render();
+  prevSnap = takeSnap();
+  updateSaveUI();
+  gcPhotos();
+}).catch(()=>{ bootReady = true; if(!maybeSeed()) render(); });
 try{ if(localStorage.getItem(planKey(state.profileId))) lastSavedAt = Date.now(); }catch(_){ }
 prevSnap = takeSnap();
 renderProfiles();
