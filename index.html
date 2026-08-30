@@ -1128,6 +1128,8 @@ function hideBanner(){ $("#banner").classList.remove("show"); }
 /* A newer copy somewhere else is never an emergency, so it must never block the app.
    Offer it in the banner and let the work carry on around it. */
 function offerNewer(where, when, onTake, onKeep){
+  FS.hold = true;                       // no folder writes while the answer is pending
+  const release = fn => ()=>{ FS.hold = false; fn && fn(); };
   const b = $("#banner");
   b.innerHTML =
     `A newer copy of this account is in <b>${esc(where)}</b> (${new Date(when).toLocaleString()}). ` +
@@ -1135,9 +1137,9 @@ function offerNewer(where, when, onTake, onKeep){
     `<button class="btn" id="offerKeep">Keep this device's</button> ` +
     `<button class="btn" id="bannerHide">Dismiss</button>`;
   b.classList.add("show");
-  $("#offerTake").onclick = ()=>{ hideBanner(); onTake(); };
-  $("#offerKeep").onclick = ()=>{ hideBanner(); onKeep(); };
-  $("#bannerHide").onclick = hideBanner;
+  $("#offerTake").onclick = release(()=>{ hideBanner(); onTake(); });
+  $("#offerKeep").onclick = release(()=>{ hideBanner(); onKeep(); });
+  $("#bannerHide").onclick = release(hideBanner);   // ignoring it lets this device carry on
 }
 
 let toastTimer;
@@ -3981,7 +3983,7 @@ function maybeSeed(force){
    which is the whole reason this exists: photos are embedded in the plan, and localStorage
    simply cannot hold a real feed plus option stacks. */
 const FSA_SUPPORTED = typeof window.showDirectoryPicker === "function";
-const FS = { handle:null, name:"", lastWrite:0, status:"", denied:false, seen:{} };
+const FS = { handle:null, name:"", lastWrite:0, status:"", denied:false, seen:{}, hold:false };
 /* seen[profileId] = the savedAt of the file as this device last left it — written by us
    or loaded from someone else. A file still carrying that stamp needs no reconciling.
    Kept in localStorage too (a few bytes, so it survives a quota failure that the plan
@@ -4042,12 +4044,40 @@ async function connectFolder(){
       FS.status = "Permission refused."; renderSyncUI(); return false;
     }
     FS.handle = handle; FS.name = handle.name; FS.denied = false; FS.status = "";
-    await idbSet("folder", handle);
-    await folderWrite(JSON.stringify(serialize(true)), true);
+    /* Remembering the handle is a convenience: if it fails you reconnect next session,
+       which is no reason to abandon a folder that is otherwise working. */
+    try{ await idbSet("folder", handle); }catch(_){ }
+
+    /* Look before writing. The folder may already hold a plan from another machine,
+       and connecting must never be the thing that destroys it. */
+    let offering = false;
+    const existing = await folderRead(planFile());
+    const mineEmpty = !state.grid.length && !state.tray.length;
+    const theirsAt  = existing ? (Date.parse(existing.savedAt || 0) || 0) : 0;
+    const mineAt    = Date.parse(lastSavedPlanStamp() || 0) || 0;
+
+    if(existing && mineEmpty){
+      adopt(existing); render(); prevSnap = takeSnap();
+      markSeen(state.profileId, existing.savedAt);
+      try{ localStorage.setItem(planKey(state.profileId), JSON.stringify(serialize(false))); }catch(_){ }
+      renderProfiles();
+      toast("Opened the plan already in " + handle.name);
+    }else if(existing && theirsAt > mineAt + 1000){
+      offering = true;
+      markSeen(state.profileId, existing.savedAt);
+      offerNewer(handle.name, theirsAt,
+        ()=>{ adopt(existing); render(); prevSnap = takeSnap(); save();
+              toast("Loaded the copy from " + handle.name); },
+        ()=>{ folderWrite(JSON.stringify(serialize(true)), true);
+              toast("Kept this device's version"); });
+    }else{
+      await folderWrite(JSON.stringify(serialize(true)), true);
+    }
     // localStorage no longer needs the pixels
     try{ localStorage.setItem(planKey(state.profileId), JSON.stringify(serialize(false))); }catch(_){ }
-    hideBanner(); renderSyncUI();
-    toast("Saving to " + handle.name + " from now on");
+    if(!offering) hideBanner();          // never wipe the choice we just put up
+    renderSyncUI();
+    if(!offering) toast("Saving to " + handle.name + " from now on");
     return true;
   }catch(e){
     if(e && e.name === "AbortError") return false;      // they closed the picker
@@ -4082,7 +4112,9 @@ async function folderRestore(){
 
 let fsTimer = null;
 function folderWrite(text, now){
-  if(!FS.handle || FS.denied) return;
+  /* A choice about this file is on screen: writing now would destroy the very copy
+     being offered, before it can be taken. */
+  if(!FS.handle || FS.denied || FS.hold) return;
   clearTimeout(fsTimer);
   const doWrite = async ()=>{
     try{
