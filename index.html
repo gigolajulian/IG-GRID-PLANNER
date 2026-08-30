@@ -259,6 +259,14 @@
   .grade.gB{background:#b9c46f;}
   .grade.gC{background:var(--warn-dark);}
   .grade.gD{background:var(--danger);color:#fff;}
+  /* sits beside the fit grade; absent entirely on near-monochrome frames */
+  .rhythm .tile .hue-dot{display:block;}
+  .hue-dot{
+    display:none;position:absolute;left:24px;bottom:4px;z-index:6;
+    width:10px;height:10px;border-radius:50%;
+    box-shadow:0 0 0 1px rgba(0,0,0,.55), 0 0 0 2px rgba(255,255,255,.28);
+  }
+  .tray .tile .hue-dot{left:4px;}
   .tile.clash-dark{box-shadow:inset 0 0 0 2px var(--warn-dark);}
   .tile.clash-busy{box-shadow:inset 0 0 0 2px var(--warn-busy);}
   .tile.clash-dark.clash-busy{box-shadow:inset 0 0 0 2px var(--warn-dark),inset 0 0 0 4px var(--warn-busy);}
@@ -411,13 +419,19 @@
   #btnRefresh.spin .ico{animation:spin .9s linear infinite;}
   @keyframes spin{to{transform:rotate(360deg);}}
 
-  #syncModal, #cloudModal{
+  #syncModal, #cloudModal, #tplModal, #verModal{
     position:fixed;inset:0;z-index:90;display:none;
     background:rgba(6,6,8,.78);backdrop-filter:blur(4px);
     padding:28px 16px;overflow-y:auto;
   }
   #syncModal.show{display:block;}
-  #cloudModal.show{display:grid;place-items:center;}
+  #cloudModal.show, #tplModal.show, #verModal.show{display:grid;place-items:center;}
+  #tplModal .sheet, #verModal .sheet{max-width:520px;width:100%;margin:0;}
+  #tplText{min-height:120px;font-family:ui-monospace,Consolas,monospace;font-size:12.5px;}
+  .tpl-preview{
+    white-space:pre-wrap;background:var(--panel-2);border:1px solid var(--line-2);
+    border-radius:5px;padding:9px 10px;font-size:12.5px;color:var(--txt-dim);min-height:40px;
+  }
   #cloudModal .sheet{max-width:460px;width:100%;margin:0;}
   .sheet{
     max-width:560px;margin:0 auto;background:var(--panel);
@@ -650,6 +664,7 @@
       <button id="btnNums">Always show slot numbers</button>
       <button id="btnScale">Interface size: 160%</button>
       <hr>
+      <button id="btnTplEdit">Caption format…</button>
       <button id="btnCloud">Cloud sync…</button>
       <button id="btnExport">Export plan…</button>
       <button id="btnImport">Import plan…</button>
@@ -813,6 +828,32 @@
 
 <div class="menu ctxmenu" id="ctxMenu" role="menu"></div>
 
+<div id="tplModal">
+  <div class="sheet">
+    <div class="sheet-head">
+      <h2>Caption format</h2><div class="spacer"></div>
+      <button class="btn" id="tplClose">Close</button>
+    </div>
+    <div class="sheet-body">
+      <p class="hint">Write your fixed format once. Apply it to a tile from the inspector,
+        or to everything at once below. Tokens:
+        <b>{title}</b> <b>{set}</b> <b>{slot}</b> <b>{date}</b> <b>{file}</b></p>
+      <div class="field">
+        <label>Template</label>
+        <textarea id="tplText" placeholder="{title}&#10;&#10;Shot on location · {set}&#10;#film #portrait"></textarea>
+      </div>
+      <div class="field">
+        <label>Preview</label>
+        <div class="tpl-preview" id="tplPreview"></div>
+      </div>
+      <div class="row-btns">
+        <button class="btn primary" id="tplSave">Save format</button>
+        <button class="btn" id="tplAll">Apply to every tile</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div id="cloudModal">
   <div class="sheet">
     <div class="sheet-head">
@@ -900,6 +941,8 @@ const state = {
   grid: [],       // ids, index 0 = newest = top-left
   tray: [],       // ids not yet slotted
   profileId: null,   // which account's plan is loaded
+  template: "",      // caption format, per account
+  versions: [],      // named arrangements, per account
   view: "phone",
   rhythm: true,
   nums: false,
@@ -931,6 +974,7 @@ function serialize(withImages, forExport){
     v:1, savedAt:new Date().toISOString(),
     items, grid:state.grid, tray:state.tray,
     view:state.view, rhythm:state.rhythm, nums:state.nums, scale:state.scale,
+    template:state.template, versions:state.versions,
     imagesDropped: !withImages,
     // the access token is a credential — it stays in this browser and never goes into an export file
     sync: forExport ? {mode:IG.mode, lastSync:IG.lastSync, limit:IG.limit}
@@ -1027,6 +1071,11 @@ function adopt(data){
       alts: Array.isArray(s.alts) ? s.alts : [],
       note: s.note || "",
       hash: typeof s.hash === "string" ? s.hash : null,
+      title: s.title || "",
+      set:   s.set   || "",
+      hue:  typeof s.hue  === "number" ? s.hue  : null,
+      sat:  typeof s.sat  === "number" ? s.sat  : null,
+      warm: typeof s.warm === "number" ? s.warm : null,
       lum: typeof s.lum==="number" ? s.lum : null,
       busy: typeof s.busy==="number" ? s.busy : null,
       igId: s.igId || null,              // dedupe key for re-syncs
@@ -1046,6 +1095,8 @@ function adopt(data){
   if(typeof data.rhythm==="boolean") state.rhythm = data.rhythm;
   if(typeof data.nums==="boolean")   state.nums   = data.nums;
   if(typeof data.scale==="number"){ state.scale = clamp(data.scale, 0.5, 3); scaleFromSave = true; }
+  state.template = typeof data.template === "string" ? data.template : "";
+  state.versions = Array.isArray(data.versions) ? data.versions : [];
   state.imagesDropped = !!data.imagesDropped;
   state.selId = null; state.cropId = null;
   normaliseOrder();
@@ -1156,6 +1207,7 @@ function findDuplicate(hash, ignoreId){
 function newItem(over){
   const it = { id:uid(), name:"", src:null, remote:null, w:0, h:0, fx:50, fy:50,
                posted:false, pinned:false, note:"", lum:null, busy:null, hash:null,
+               hue:null, sat:null, warm:null, title:"", set:"",
                igId:null, ts:0, permalink:null, alts:[], ...over };
   state.items[it.id] = it;
   return it;
@@ -1242,7 +1294,7 @@ async function importSets(fileList){
       try{
         const {src, w, h, hash} = await ingestBlob(f);
         if(!it){
-          it = newItem({name:f.name, src, w, h, hash, note:set.name});
+          it = newItem({name:f.name, src, w, h, hash, set:set.name});
           fresh.push(it.id);
           await computeStats(it);
         }else{
@@ -1336,7 +1388,42 @@ async function computeStats(it){
       if(y<H-1){ diff += Math.abs(L[i]-L[i+W]); n++; }
     }
     it.busy = clamp((diff/n) * 6, 0, 1);   // scaled so typical photos spread across 0..1
+
+    /* Colour, from the same samples. Hue is averaged as a circular quantity -- a plain
+       mean would put the average of red and magenta somewhere around cyan -- and each
+       pixel is weighted by its own saturation, so a near-monochrome frame contributes
+       almost nothing and does not invent a hue out of sensor noise. */
+    let sx = 0, sy = 0, satSum = 0, warmSum = 0;
+    for(let i=0;i<W*H;i++){
+      const R = d[i*4]/255, G = d[i*4+1]/255, B = d[i*4+2]/255;
+      const mx = Math.max(R,G,B), mn = Math.min(R,G,B), ch = mx - mn;
+      const sat = mx <= 0 ? 0 : ch/mx;
+      satSum += sat;
+      warmSum += (R - B);
+      if(ch > 0.02){
+        let hue;
+        if(mx === R)      hue = ((G-B)/ch + 6) % 6;
+        else if(mx === G) hue = (B-R)/ch + 2;
+        else              hue = (R-G)/ch + 4;
+        hue *= Math.PI/3;                       // sextants -> radians
+        sx += Math.cos(hue) * sat;
+        sy += Math.sin(hue) * sat;
+      }
+    }
+    const N = W*H;
+    it.sat  = clamp(satSum/N, 0, 1);
+    it.warm = clamp((warmSum/N) * 3, -1, 1);    // >0 warm, <0 cool
+    const mag = Math.hypot(sx, sy) / N;
+    // below this the frame is effectively monochrome and a hue would be meaningless
+    it.hue = mag < 0.02 ? null : ((Math.atan2(sy, sx) * 180/Math.PI) + 360) % 360;
   }catch(_){ }
+}
+
+/* shortest distance between two hues on the colour wheel, 0..180 */
+function hueGap(a, b){
+  if(a == null || b == null) return null;
+  const d = Math.abs(a - b) % 360;
+  return d > 180 ? 360 - d : d;
 }
 
 /* ============================ history (undo) ============================ */
@@ -1422,8 +1509,15 @@ function analyze(){
 /* Good neighbours differ — in tone first, texture second. Clashes drag the grade down. */
 function pairContrast(a, b){
   if(!a || !b || a.lum == null || b.lum == null) return null;
-  return 0.65*Math.min(1, Math.abs(a.lum - b.lum)/0.30) +
-         0.35*Math.min(1, Math.abs(a.busy - b.busy)/0.35);
+  const tone    = Math.min(1, Math.abs(a.lum  - b.lum )/0.30);
+  const texture = Math.min(1, Math.abs(a.busy - b.busy)/0.35);
+  /* Colour only earns a say when both frames are saturated enough for hue to be real.
+     Weight fades to zero on monochrome work rather than scoring sensor noise. */
+  const colourWeight = Math.min(1, Math.min(a.sat ?? 0, b.sat ?? 0) / 0.18);
+  const gap = hueGap(a.hue, b.hue);
+  const colour = (gap == null) ? 0 : Math.min(1, gap/60);
+  const w = 0.14 * colourWeight;
+  return (0.65 - w*0.65)*tone + (0.35 - w*0.35)*texture + w*colour;
 }
 function neighboursAt(order, i){
   const nb = [];
@@ -1632,6 +1726,10 @@ function tileEl(id, zone, index, flags){
         `</svg><span>${it.alts.length+1}</span></div>` : "") +
     (it.note ? `<div class="note-dot" title="has a note"></div>` : "") +
     (it.posted ? `<div class="posted-dot"></div>` : "") +
+    (it.sat != null && it.sat >= 0.10 && it.hue != null
+      ? `<div class="hue-dot" title="dominant hue ${Math.round(it.hue)}° · saturation ${Math.round(it.sat*100)}% · ${it.warm>0.05?"warm":it.warm<-0.05?"cool":"neutral"}"
+             style="background:hsl(${it.hue} ${Math.round(clamp(it.sat*140,25,90))}% 55%)"></div>`
+      : "") +
     (zone==="grid" && SCORES[id]!=null ? (()=>{
         const g = gradeOf(SCORES[id]);
         const why = flags && flags[id]
@@ -1688,6 +1786,22 @@ function flipTiles(prev){
   });
 }
 
+/* Describes a row's colour in words, because a hue number means nothing at a glance --
+   and says "neutral" honestly when the frames are too desaturated to have a hue. */
+function rowColourLabel(ids){
+  const its = ids.map(id => state.items[id]).filter(i => i && i.sat != null);
+  if(!its.length) return "–";
+  const sat = its.reduce((a,i)=>a+i.sat,0)/its.length;
+  if(sat < 0.10) return "neutral";
+  const hues = its.map(i=>i.hue).filter(v=>v!=null);
+  let spread = 0;
+  for(let a=0;a<hues.length;a++) for(let b=a+1;b<hues.length;b++)
+    spread = Math.max(spread, hueGap(hues[a], hues[b]) || 0);
+  const warm = its.reduce((a,i)=>a+(i.warm||0),0)/its.length;
+  const lean = warm > 0.05 ? "warm" : warm < -0.05 ? "cool" : "even";
+  return lean + (spread > 70 ? " · mixed" : "");
+}
+
 function render(){
   const prevRects = measureTiles();
   const stage = $("#stage");
@@ -1735,6 +1849,7 @@ function render(){
              <span>brightness <b>${pct(mean)}</b></span>
              <span>spread <b>${pct(spread)}</b></span>
              <span>busy <b>${pct(mbusy)}</b></span>
+             <span>colour <b>${rowColourLabel(ids)}</b></span>
            </div>
          </div>`;
       block.appendChild(gridEl(ids,"g-desktop",flags));
@@ -1847,6 +1962,10 @@ function renderInspector(){
     <div class="field">
       <label>Caption / notes</label>
       <textarea id="noteBox" placeholder="Title, caption, hashtags, shoot date…">${esc(it.note)}</textarea>
+      <div class="row-btns">
+        <button class="btn" id="btnTpl">${state.template ? "Apply format" : "Caption format…"}</button>
+        <button class="btn" id="btnCopyCap">Copy caption</button>
+      </div>
     </div>
 
     <div class="row-btns">
@@ -1875,6 +1994,12 @@ function renderInspector(){
   $("#btnDup").onclick     = ()=>duplicate(it.id);
   $("#btnReplace").onclick = ()=>{ replaceTarget = it.id; $("#filePicker").click(); };
   $("#btnDel").onclick     = ()=>removeTile(it.id);
+  $("#btnTpl").onclick     = ()=>{ state.template ? applyTemplateTo([it.id]) : openTemplateEditor(); };
+  $("#btnCopyCap").onclick = ()=>{
+    const txt = it.note || fillTemplate(state.template, it);
+    if(!txt){ toast("Nothing to copy yet"); return; }
+    navigator.clipboard.writeText(txt).then(()=>toast("Caption copied"), ()=>toast("Copy failed"));
+  };
 
   document.querySelectorAll("#inspBody .slotopt").forEach(el=>{
     el.addEventListener("click", e=>{
@@ -2130,7 +2255,7 @@ function stackOnto(sourceId, targetId){
   lastHistPush = 0;
   const taken = incoming.slice(0, room);
   dst.alts.push(...taken);
-  if(!dst.note && src.note) dst.note = src.note;      // keep the set name
+  if(!dst.set && src.set) dst.set = src.set;          // keep the set name
   del(sourceId);
   normaliseOrder();
   if(state.grid.includes(targetId) && dst.alts.length) autoPickFrames();
@@ -2216,6 +2341,16 @@ window.addEventListener("drop", e=>{
 /* ============================ clicks ============================ */
 let replaceTarget = null;
 
+let clickWasInside = false;
+const KEEPS_SELECTION = ["#inspector","header","#syncModal","#cloudModal","#tplModal","#sliceModal",
+                         "#addModal","#ctxMenu","#profileMenu","#menu"];
+document.addEventListener("click", e=>{
+  const t = e.target;
+  clickWasInside =
+    !!(t && t.closest && KEEPS_SELECTION.some(sel => t.closest(sel))) ||
+    !!(t && t.matches && t.matches('input[type="file"]'));
+}, true);
+
 document.addEventListener("click", e=>{
   const btn = e.target.closest(".tools button");
   if(btn){
@@ -2249,15 +2384,9 @@ document.addEventListener("click", e=>{
     render();
     return;
   }
-  // a programmatic click on a hidden file input must not count as "clicked away"
-  if(e.target.matches && e.target.matches('input[type="file"]')) return;
-  if(e.target.closest("#ctxMenu")) return;
+  if(clickWasInside) return;      // decided in the capture phase, before anything re-rendered
   closeCtx();
-  if(!e.target.closest("#inspector") && !e.target.closest("header") &&
-     !e.target.closest("#syncModal") && !e.target.closest("#cloudModal") &&
-     !e.target.closest("#sliceModal")){
-    if(state.selId || state.cropId){ state.selId=null; state.cropId=null; state.inspOpen=false; render(); }
-  }
+  if(state.selId || state.cropId){ state.selId=null; state.cropId=null; state.inspOpen=false; render(); }
 });
 
 /* on-tile crop dragging (only for the tile in crop mode) */
@@ -3745,6 +3874,53 @@ function renderProfiles(){
      <button data-pact="delete" class="danger">Delete this account…</button>`;
 }
 
+/* ============================ caption templates ============================ */
+/* One fixed format per account, filled in per tile. The resolved text lands in the
+   tile's note, which is what you actually paste on posting day. */
+const TEMPLATE_TOKENS = ["title","set","slot","date","file"];
+
+function fillTemplate(tpl, it){
+  if(!tpl) return "";
+  const slot = state.grid.indexOf(it.id);
+  const vals = {
+    title: it.title || "",
+    set:   it.set || "",
+    slot:  slot >= 0 ? String(slot + 1) : "",
+    date:  new Date().toLocaleDateString(),
+    file:  (it.name || "").replace(/.[^.]+$/, "")
+  };
+  return tpl.replace(/{(w+)}/g, (m, k) =>
+    Object.prototype.hasOwnProperty.call(vals, k) ? vals[k] : m);
+}
+
+function applyTemplateTo(ids){
+  if(!state.template){ toast("Set a caption format first"); return 0; }
+  lastHistPush = 0;
+  let n = 0;
+  for(const id of ids){
+    const it = state.items[id];
+    if(!it) continue;
+    it.note = fillTemplate(state.template, it);
+    n++;
+  }
+  render(); save();
+  return n;
+}
+
+function openTemplateEditor(){
+  const m = $("#tplModal");
+  m.classList.add("show");
+  $("#tplText").value = state.template;
+  renderTemplatePreview();
+}
+function renderTemplatePreview(){
+  const it = state.items[state.selId] || state.items[state.grid[0]];
+  const out = $("#tplPreview");
+  if(!out) return;
+  const tpl = $("#tplText").value;
+  out.textContent = it ? fillTemplate(tpl, it) : "(add a photo to preview)";
+}
+
 /* ============================ starter feed ============================ */
 
 
@@ -4185,6 +4361,15 @@ function renderSyncUI(){
 $("#btnCloud").onclick  = async ()=>{ $("#cloudModal").classList.add("show"); renderSyncUI();
                                       await syncSession(); renderSyncUI(); };
 $("#syncClose2").onclick = ()=>$("#cloudModal").classList.remove("show");
+$("#btnTplEdit").onclick = ()=>{ closeMenu(); openTemplateEditor(); };
+$("#tplClose").onclick   = ()=>$("#tplModal").classList.remove("show");
+$("#tplModal").addEventListener("click", e=>{ if(e.target.id === "tplModal") e.currentTarget.classList.remove("show"); });
+$("#tplText").addEventListener("input", renderTemplatePreview);
+$("#tplSave").onclick    = ()=>{ state.template = $("#tplText").value; save(); render();
+                                 $("#tplModal").classList.remove("show"); toast("Caption format saved"); };
+$("#tplAll").onclick     = ()=>{ state.template = $("#tplText").value; save();
+                                 const n = applyTemplateTo(state.grid.concat(state.tray));
+                                 if(n) toast(`Caption written to ${n} ${n===1?"tile":"tiles"}`); };
 $("#cloudModal").addEventListener("click", e=>{ if(e.target.id === "cloudModal") e.currentTarget.classList.remove("show"); });
 
 /* ============================ boot ============================ */
