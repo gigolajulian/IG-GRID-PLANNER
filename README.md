@@ -93,10 +93,17 @@ Subfolders named **POSTED**, archive, archived, rejects or rejected are skipped,
 hidden folders like `.dropbox.cache` — so the shots you have already published stay out
 of the pending list. The toast reports how many were passed over.
 
-Imported sets land at the head of the feed under the pins, and every slot is
-**auto-picked**: the frame that reads best beside its neighbours is promoted. Because
-picking one slot changes what its neighbours should be, it repeats until nothing moves.
-**Auto-pick** in the toolbar re-runs it any time.
+Imported sets **wait in the staging tray** as stacks rather than jumping into the grid,
+so you place them deliberately. A stack is auto-picked the moment it lands in the grid —
+that is the first point at which it has neighbours to be judged against. **Auto-pick** in
+the toolbar re-runs it any time.
+
+### Stacking photos by hand
+
+Drag one photo **onto the middle of another** to merge them into a single slot with both
+as options — the tile highlights and says *stack*. Drop near a tile's left or right edge
+instead and it reorders as usual. Works in the tray and in the grid, stacks can be merged
+into stacks, and the whole thing is one undo step.
 
 ### Trying several frames in one slot
 
