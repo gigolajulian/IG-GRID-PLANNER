@@ -1030,6 +1030,7 @@ function saveNow(){
     try{
       localStorage.setItem(planKey(state.profileId), JSON.stringify(serialize(false)));
       state.imagesDropped = true;
+      if(FS.handle && !FS.denied){ hideBanner(); syncAfterSave(); return; }
       showBanner(
         "Storage quota exceeded — your layout, crops and notes are saved, but the <b>photos are not</b>. " +
         (FSA_SUPPORTED
@@ -1040,7 +1041,12 @@ function saveNow(){
       );
     }catch(_){
       try{ localStorage.removeItem(planKey(state.profileId)); }catch(__){}
-      showBanner("Storage quota exceeded and nothing could be saved to this browser. Export your plan now — closing this tab will lose it.", true);
+      if(FS.handle && !FS.denied){
+        showBanner("This browser's storage is full, so nothing is cached here — but the full plan, photos included, is written to <b>" +
+                   esc(FS.name) + "</b> on every change.", false);
+      }else{
+        showBanner("Storage quota exceeded and nothing could be saved to this browser. Export your plan now — closing this tab will lose it.", true);
+      }
     }
   }
   syncAfterSave();     // runs whether or not localStorage coped
@@ -3960,7 +3966,18 @@ function maybeSeed(force){
    which is the whole reason this exists: photos are embedded in the plan, and localStorage
    simply cannot hold a real feed plus option stacks. */
 const FSA_SUPPORTED = typeof window.showDirectoryPicker === "function";
-const FS = { handle:null, name:"", lastWrite:0, status:"", denied:false };
+const FS = { handle:null, name:"", lastWrite:0, status:"", denied:false, seen:{} };
+/* seen[profileId] = the savedAt of the file as this device last left it — written by us
+   or loaded from someone else. A file still carrying that stamp needs no reconciling.
+   Kept in localStorage too (a few bytes, so it survives a quota failure that the plan
+   itself could not) and mirrored in memory in case even that write fails. */
+const SEEN_KEY = "ig-grid-planner-fs-seen";
+try{ FS.seen = JSON.parse(localStorage.getItem(SEEN_KEY) || "{}") || {}; }catch(_){ FS.seen = {}; }
+function markSeen(id, stamp){
+  if(!id || !stamp) return;
+  FS.seen[id] = stamp;
+  try{ localStorage.setItem(SEEN_KEY, JSON.stringify(FS.seen)); }catch(_){ }
+}
 
 /* one tiny IndexedDB store, purely to persist the directory handle across reloads */
 function idb(){
@@ -4060,6 +4077,7 @@ function folderWrite(text, now){
       const fh = await FS.handle.getFileHandle(planFile(), {create:true});
       const w  = await fh.createWritable();
       await w.write(text); await w.close();
+      try{ markSeen(state.profileId, JSON.parse(text).savedAt); }catch(_){ }
       const mh = await FS.handle.getFileHandle("profiles.json", {create:true});
       const mw = await mh.createWritable();
       await mw.write(JSON.stringify({profiles, savedAt:new Date().toISOString()}, null, 1));
@@ -4099,9 +4117,22 @@ async function folderCheck(opts){
     }
     const remote = await folderRead(planFile());
     if(!remote){ if(!silent) toast("Nothing saved in that folder for this account yet"); return false; }
-    const localAt  = Date.parse(lastSavedPlanStamp() || 0) || 0;
+    /* Only a stamp we have never reconciled means another device wrote the file. */
+    if(remote.savedAt && FS.seen[state.profileId] === remote.savedAt){
+      if(!silent) toast("Folder copy matches this device");
+      return false;
+    }
+    const localAt  = Math.max(Date.parse(lastSavedPlanStamp() || 0) || 0,
+                              Date.parse(FS.seen[state.profileId] || 0) || 0);
     const remoteAt = Date.parse(remote.savedAt || 0) || 0;
-    if(remoteAt <= localAt + 1000){ if(!silent) toast("Folder copy matches this device"); return false; }
+    if(remoteAt <= localAt + 1000){
+      markSeen(state.profileId, remote.savedAt);
+      if(!silent) toast("Folder copy matches this device");
+      return false;
+    }
+    /* Whichever way this goes, the file has now been reconciled — never ask twice
+       about the same stamp, however the answer turns out. */
+    markSeen(state.profileId, remote.savedAt);
     const takeIt = confirm(
       "The copy in " + FS.name + " is newer (" + new Date(remoteAt).toLocaleString() + ").\n\n" +
       "OK — load it and replace what is on this device.\n" +
