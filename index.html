@@ -223,7 +223,9 @@
      --ease is the gentler one for things that merely adjust. */
   :root{
     --ease:cubic-bezier(.2,.8,.2,1);
-    --ease-out:cubic-bezier(.16,1,.3,1);
+    --ease-out:cubic-bezier(.23,1,.32,1);   /* strong decelerate, for anything entering */
+    --ease-in-out:cubic-bezier(.77,0,.175,1);
+    --t-press:.16s;
     --t-fast:.13s;
     --t-mid:.2s;
     --t-slow:.32s;
@@ -372,26 +374,50 @@
   }
   .alt-badge svg{display:block;opacity:.92;}
   .alt-badge span{opacity:.95;}
-  .tile:hover .alt-badge{
-    transform:translateY(-1px);
-    box-shadow:inset 0 0 0 1px rgba(255,255,255,.42), 0 2px 9px rgba(0,0,0,.55);
+  @media (hover:hover) and (pointer:fine){
+    .tile:hover .alt-badge{
+      transform:translateY(-1px);
+      box-shadow:inset 0 0 0 1px rgba(255,255,255,.42), 0 2px 9px rgba(0,0,0,.55);
+    }
   }
   .tray .tile .alt-badge{bottom:4px;height:16px;font-size:9px;}
 
 
+  /* ---------- press feedback ----------
+     Every pressable thing scales fractionally under the finger. Nobody notices it
+     individually; without it the whole interface feels like it isn't listening. */
+  .btn,.seg button,.menu button,.tools button,.opt-add,.toast-act,
+  #compactSlot .btn,.slotopt,.profile-item{
+    transition:color var(--t-fast) ease,border-color var(--t-fast) ease,
+               background var(--t-fast) ease,transform var(--t-press) var(--ease-out);
+  }
+  .btn:active,.seg button:active,.menu button:active,.opt-add:active,
+  .toast-act:active,#compactSlot .btn:active,.profile-item:active{
+    transform:scale(.97);
+  }
+  /* tile controls are smaller, so they need a smaller squeeze to read as the same gesture */
+  .tools button:active{transform:scale(.92);}
+  .slotopt:active{transform:scale(.98);}
+  /* Holding a tile down should acknowledge the press before the drag takes over. */
+  .tile:active{transform:scale(.995);}
+
   /* ---------- motion ---------- */
   @media (prefers-reduced-motion: no-preference){
-    .tile img{transition:transform .45s cubic-bezier(.2,.8,.2,1);}
-    .tile:hover img{transform:scale(1.045);}
+    .tile img{transition:transform .45s var(--ease);}
     .tile.dragging img,.tile.cropping img{transition:none;transform:none;}
     .grade{transition:transform var(--t-mid) var(--ease);}
-    .tile:hover .grade{transform:scale(1.18);}
-    .tools button{transition:background .14s ease,color .14s ease,transform .14s ease;}
-    .tools button:hover{transform:translateY(-1px);}
+    .tools button{transition:background .14s ease,color .14s ease,transform var(--t-press) var(--ease-out);}
     .tools,.idx{transition:opacity .16s ease;}
     .sheet,.slice-sheet{animation:sheetIn var(--t-slow) var(--ease-out);}
     .menu.show{animation:menuIn var(--t-fast) var(--ease-out);}
     .tray .tile{transition:transform var(--t-mid) var(--ease),box-shadow var(--t-mid) ease;}
+  }
+  /* A touch tap fires :hover and leaves it stuck there, so every hover that moves
+     something is gated on a real pointer. */
+  @media (prefers-reduced-motion: no-preference) and (hover:hover) and (pointer:fine){
+    .tile:hover img{transform:scale(1.045);}
+    .tile:hover .grade{transform:scale(1.18);}
+    .tools button:hover{transform:translateY(-1px);}
     .tray .tile:hover{transform:translateY(-3px);}
   }
   @keyframes sheetIn{from{opacity:0;transform:translateY(12px) scale(.985);}to{opacity:1;transform:none;}}
@@ -434,10 +460,12 @@
   #inspector{
     position:fixed;top:0;right:0;bottom:0;width:312px;z-index:60;
     background:var(--panel);border-left:1px solid var(--line);
-    transform:translateX(100%);transition:transform var(--t-slow) var(--ease-out);
+    transform:translateX(100%);
+    transition:transform var(--t-fast) var(--ease-out);   /* closing: they have decided */
     display:flex;flex-direction:column;overflow-y:auto;
   }
-  #inspector.open{transform:none;box-shadow:-30px 0 60px -40px #000;}
+  #inspector.open{transform:none;box-shadow:-30px 0 60px -40px #000;
+                  transition:transform var(--t-slow) var(--ease-out);}
   .insp-head{display:flex;align-items:center;padding:12px 14px;border-bottom:1px solid var(--line);}
   .insp-head h2{margin:0;font-size:11px;letter-spacing:1.1px;text-transform:uppercase;color:var(--txt-dim);font-weight:600;}
   .insp-body{padding:14px;display:flex;flex-direction:column;gap:14px;}
