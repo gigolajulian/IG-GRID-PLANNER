@@ -709,6 +709,16 @@
     .slice-sheet{grid-template-columns:1fr;grid-template-rows:auto 1fr auto;}
     .opt-add,.slotopt{width:74px;}
     header .btn{padding:7px 11px;}
+
+    /* You are already holding a phone. Drawing another one around the grid costs
+       ~40px of width and adds fake chrome you can't tap. */
+    .phone{width:100%;border:0;border-radius:0;padding:0;background:transparent;box-shadow:none;}
+    .phone-inner{border-radius:0;}
+    .phone-tabs{display:none;}                 /* pure decoration */
+    main{padding:12px 0 96px;gap:14px;}        /* the grid runs edge to edge */
+    .stagecol{gap:14px;}
+    .legend{padding:0 12px;}
+    .tray-sec{padding:0 12px;}
   }
 </style>
 </head>
